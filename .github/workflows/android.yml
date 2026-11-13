@@ -1,0 +1,68 @@
+name: Android APK
+
+on:
+  push:
+    branches: ['main', 'claude/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk BodyTwin-1.0.${{ github.run_number }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BodyTwin-1.0.${{ github.run_number }}
+          path: BodyTwin-*.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Body Twin 1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: BodyTwin-*.apk
+          body: |
+            APK для Android. Скачай файл `BodyTwin-1.0.${{ github.run_number }}.apk` ниже, открой его на телефоне и разреши установку из этого источника.
+            Новые версии устанавливаются поверх старой — данные сохраняются.
