@@ -47,7 +47,11 @@ async function step(name, fn) {
 const expect = (cond, msg) => {
   if (!cond) throw new Error('assert: ' + msg);
 };
-const state = () => page.evaluate((k) => JSON.parse(localStorage.getItem(k) || '{}').state, STORAGE_KEY);
+// the app debounces persistence by 250 ms
+const state = async () => {
+  await page.waitForTimeout(400);
+  return page.evaluate((k) => JSON.parse(localStorage.getItem(k) || '{}').state, STORAGE_KEY);
+};
 const tab = (name) => page.locator('.tab', { hasText: name }).click();
 const visibleScreen = () => page.locator('.screen:visible').first();
 // screenshots are best-effort: software WebGL can make them very slow on a loaded machine

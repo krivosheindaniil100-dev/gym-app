@@ -4,6 +4,8 @@ import { parseQr, completeFields, parseDateLoose } from '../lib/qr';
 import { buildBody } from '../body/model';
 import { measureBody } from '../body/measure';
 import { DEFAULT_PROFILE } from '../lib/defaults';
+import { generatePlan, exById } from '../lib/training';
+import type { TrainingPrefs } from '../lib/types';
 import type { FoodEntry, Measurement } from '../lib/types';
 
 const m0: Measurement = { id: 'a', date: new Date(2026, 9, 1, 8, 0).toISOString(), source: 'manual', weight: 80, fatPct: 20, fatKg: 16, ffm: 64, smm: 36 };
@@ -138,5 +140,47 @@ describe('ledger edge cases', () => {
     expect(parseDateLoose('10.11.2026 08:15')).toBeDefined();
     expect(Number.isNaN(navyBodyFat('male', 180, 38, 85))).toBe(true);
     expect(navyBodyFat('male', 180, 90, 39)).toBeGreaterThan(10);
+  });
+});
+
+describe('training plan generator invariants', () => {
+  it('holds for a broad sample of preference combinations', () => {
+    const goals = ['cut', 'recomp', 'maintain', 'bulk'] as const;
+    const exps = ['novice', 'intermediate', 'advanced'] as const;
+    const places = ['gym', 'home_dumbbells', 'home_bodyweight'] as const;
+    const ints = ['light', 'moderate', 'hard'] as const;
+    const prios: TrainingPrefs['priority'][] = [[], ['shoulders'], ['glutes', 'abs'], ['chest', 'back', 'biceps']];
+    const avoids: TrainingPrefs['avoid'][] = [[], ['knees'], ['lower_back'], ['knees', 'lower_back', 'shoulders']];
+    let n = 0;
+    for (const goal of goals)
+      for (const experience of exps)
+        for (const daysPerWeek of [2, 3, 4, 5, 6] as const)
+          for (const sessionMinutes of [30, 45, 60, 75, 90] as const)
+            for (const place of places)
+              for (const intensity of ints)
+                for (const priority of prios)
+                  for (const avoid of avoids) {
+                    if (n++ % 7) continue; // sample every 7th of 34 560 combinations
+                    const prefs: TrainingPrefs = { goal, experience, daysPerWeek, sessionMinutes, place, intensity, priority, avoid, cardio: 'none' };
+                    const p = generatePlan(prefs);
+                    const tag = JSON.stringify(prefs);
+                    expect(p.days.length, tag).toBe(daysPerWeek);
+                    expect(p.schedule.filter((x) => x !== 'rest').length, tag).toBe(daysPerWeek);
+                    const maxLevel = experience === 'novice' ? 1 : experience === 'intermediate' ? 2 : 3;
+                    for (const d of p.days) {
+                      const ids = d.exercises.map((x) => x.exerciseId);
+                      expect(new Set(ids).size, tag).toBe(ids.length);
+                      expect(ids.length, tag).toBeGreaterThanOrEqual(2);
+                      expect(d.estMinutes, tag).toBeLessThanOrEqual(sessionMinutes + 10);
+                      for (const pe of d.exercises) {
+                        const ex = exById(pe.exerciseId)!;
+                        expect(ex.stress.some((s) => avoid.includes(s)), tag).toBe(false);
+                        expect(ex.level, tag).toBeLessThanOrEqual(maxLevel);
+                        expect(pe.sets, tag).toBeGreaterThanOrEqual(2);
+                        expect(pe.sets, tag).toBeLessThanOrEqual(5);
+                      }
+                    }
+                    for (const v of Object.values(p.weeklySets)) expect(v!, tag).toBeLessThanOrEqual(26);
+                  }
   });
 });

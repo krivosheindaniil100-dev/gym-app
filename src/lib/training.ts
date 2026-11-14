@@ -201,6 +201,83 @@ function exerciseMinutes(pe: Omit<PlannedExercise, 'exerciseId'>, ex: Exercise) 
   return (pe.sets * perSet) / 60 + 1; // + setup
 }
 
+const maxSetsFor = (ex: Exercise) => (ex.compound ? 5 : 4);
+const strengthMinutes = (exs: PlannedExercise[]) => exs.reduce((s, pe) => s + exerciseMinutes(pe, EX_MAP.get(pe.exerciseId)!), 0);
+
+/** Make a day fit the chosen session length: clamp sets, then trim sets → rests → accessory exercises; fill spare time. */
+function fitToBudget(exs: PlannedExercise[], budget: number) {
+  for (const pe of exs) pe.sets = Math.min(pe.sets, maxSetsFor(EX_MAP.get(pe.exerciseId)!));
+  for (let guard = 0; guard < 80 && strengthMinutes(exs) > budget + 2; guard++) {
+    const maxSets = Math.max(...exs.map((pe) => pe.sets));
+    if (maxSets > 2) {
+      // take a set from the last exercise that has the most sets (accessories lose volume before the main lifts)
+      for (let i = exs.length - 1; i >= 0; i--)
+        if (exs[i].sets === maxSets) {
+          exs[i].sets--;
+          break;
+        }
+      continue;
+    }
+    const floor = (pe: PlannedExercise) => (EX_MAP.get(pe.exerciseId)!.compound ? 75 : 45);
+    if (exs.some((pe) => pe.restSec > floor(pe))) {
+      for (const pe of exs) pe.restSec = Math.max(floor(pe), pe.restSec - 15);
+      continue;
+    }
+    if (exs.length > 2) {
+      exs.pop();
+      continue;
+    }
+    break;
+  }
+  // use spare time: one more set on the main lifts first
+  for (let round = 0; round < 2 && strengthMinutes(exs) < budget * 0.8; round++) {
+    for (const pe of exs) {
+      const ex = EX_MAP.get(pe.exerciseId)!;
+      if (pe.sets >= maxSetsFor(ex)) continue;
+      pe.sets++;
+      if (strengthMinutes(exs) > budget + 2) {
+        pe.sets--;
+        break;
+      }
+    }
+  }
+}
+
+function weeklyVolume(days: PlannedDay[]): Partial<Record<MuscleGroup, number>> {
+  const w: Partial<Record<MuscleGroup, number>> = {};
+  for (const d of days)
+    for (const pe of d.exercises) {
+      const ex = EX_MAP.get(pe.exerciseId)!;
+      for (const m of ex.primary) w[m] = (w[m] ?? 0) + pe.sets;
+      for (const m of ex.secondary) w[m] = (w[m] ?? 0) + pe.sets * 0.5;
+    }
+  return w;
+}
+
+/** No muscle should get more than ~24 hard sets a week (beyond that recovery suffers, especially in a deficit). */
+function capWeeklyVolume(days: PlannedDay[], cap = 24) {
+  for (let guard = 0; guard < 120; guard++) {
+    const w = weeklyVolume(days);
+    const over = (Object.entries(w) as [MuscleGroup, number][]).filter(([, v]) => v > cap).sort((a, b) => b[1] - a[1])[0];
+    if (!over) break;
+    const m = over[0];
+    let best: PlannedExercise | null = null;
+    let bestScore = -1;
+    for (const d of days)
+      for (const pe of d.exercises) {
+        const ex = EX_MAP.get(pe.exerciseId)!;
+        if (pe.sets <= 2 || !(ex.primary.includes(m) || ex.secondary.includes(m))) continue;
+        const score = pe.sets + (ex.compound ? 0 : 0.5) + (ex.primary.includes(m) ? 1 : 0);
+        if (score > bestScore) {
+          bestScore = score;
+          best = pe;
+        }
+      }
+    if (!best) break;
+    best.sets--;
+  }
+}
+
 export function availableExercises(p: TrainingPrefs): Exercise[] {
   const eq = new Set(PLACE_EQUIP[p.place]);
   const maxLevel = p.experience === 'novice' ? 1 : p.experience === 'intermediate' ? 2 : 3;
@@ -231,6 +308,8 @@ function rank(ex: Exercise, p: TrainingPrefs, variant: number, used: Set<string>
   if (ex.compound) s += 2;
   if (p.place === 'gym' && ex.equipment.some((q) => q === 'barbell' || q === 'machine' || q === 'cable')) s += 1.5;
   if (p.priority.some((m) => ex.primary.includes(m))) s += 2;
+  // the hinge slot is the only guaranteed hamstring work in short programmes → prefer RDL-type hinges
+  if (ex.pattern === 'hinge' && ex.primary.includes('hamstrings')) s += 1.5;
   if (p.place === 'home_dumbbells' && ex.equipment.includes('dumbbell')) s += 1.5;
   if (p.place !== 'home_bodyweight' && ex.equipment.length === 1 && ex.equipment[0] === 'band') s -= 1;
   // deterministic pseudo-variety
@@ -284,12 +363,13 @@ export function generatePlan(p: TrainingPrefs): TrainingPlan {
       usedWeek.set(best.id, (usedWeek.get(best.id) ?? 0) + 1);
       exs.push({ exerciseId: best.id, ...pres, note: best.cue });
     }
+    fitToBudget(exs, budget);
     const day: PlannedDay = {
       id: uid(),
       name: tpl.name,
       focus: tpl.focus,
       exercises: exs,
-      estMinutes: Math.round(minutes + warmup + cardioMin),
+      estMinutes: Math.round(strengthMinutes(exs) + warmup + cardioMin),
     };
     if (cardioMin) {
       const c = p.place === 'gym' ? CARDIO_FOR_PLAN.liss : { name: 'Быстрая ходьба / ходьба по лестнице', met: 5.0 };
@@ -298,18 +378,14 @@ export function generatePlan(p: TrainingPrefs): TrainingPlan {
     days.push(day);
   });
 
+  capWeeklyVolume(days);
+  for (const d of days) d.estMinutes = Math.round(strengthMinutes(d.exercises) + warmup + (d.cardio?.minutes ?? 0));
+
   // schedule (Mon..Sun)
   const sched: (string | 'rest')[] = new Array(7).fill('rest');
   SCHEDULES[p.daysPerWeek].forEach((wd, i) => (sched[wd] = days[i].id));
 
-  // weekly volume
-  const weeklySets: Partial<Record<MuscleGroup, number>> = {};
-  for (const d of days)
-    for (const pe of d.exercises) {
-      const ex = EX_MAP.get(pe.exerciseId)!;
-      for (const m of ex.primary) weeklySets[m] = (weeklySets[m] ?? 0) + pe.sets;
-      for (const m of ex.secondary) weeklySets[m] = (weeklySets[m] ?? 0) + pe.sets * 0.5;
-    }
+  const weeklySets = weeklyVolume(days);
 
   const rationale = [split.why];
   const tips: string[] = [];

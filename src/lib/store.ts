@@ -15,12 +15,30 @@ import { dayKey, uid } from './date';
 import type { MField } from './qr';
 import { DEFAULT_PROFILE } from './defaults';
 
+// Writes are debounced: the whole state is one JSON blob, and typing in a field would otherwise rewrite it per keystroke.
+let pendingWrite: { name: string; value: string } | null = null;
+let writeTimer: ReturnType<typeof setTimeout> | undefined;
+export function flushStorage(): Promise<void> {
+  clearTimeout(writeTimer);
+  const p = pendingWrite;
+  pendingWrite = null;
+  return p ? Preferences.set({ key: p.name, value: p.value }).catch((e) => console.error('persist failed', e)) : Promise.resolve();
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => document.hidden && flushStorage());
+  window.addEventListener('pagehide', () => void flushStorage());
+}
+
 const prefStorage: StateStorage = {
   getItem: async (name) => (await Preferences.get({ key: name })).value,
   setItem: async (name, value) => {
-    await Preferences.set({ key: name, value });
+    pendingWrite = { name, value };
+    clearTimeout(writeTimer);
+    writeTimer = setTimeout(flushStorage, 250);
   },
   removeItem: async (name) => {
+    pendingWrite = null;
+    clearTimeout(writeTimer);
     await Preferences.remove({ key: name });
   },
 };
