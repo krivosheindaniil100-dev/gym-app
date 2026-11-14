@@ -235,6 +235,28 @@ export interface TrainingPrefs {
   cardio: 'none' | 'after' | 'separate';
 }
 
+export type FatZoneKey = 'belly' | 'flanks' | 'chest' | 'back' | 'glutes' | 'hips' | 'thighs' | 'arms';
+export type GirthKeyT = 'neck' | 'chest' | 'waist' | 'hips' | 'thigh' | 'calf' | 'arm';
+
+export interface AvatarSettings {
+  skinTone: string;
+  eyeColor: string;
+  hairColor: string;
+  hairStyle: 'none' | 'short' | 'buzz';
+  ethnic: { african: number; asian: number; caucasian: number };
+  /** where this person stores fat (multipliers, 1 = average) */
+  pattern: Partial<Record<FatZoneKey, number>>;
+  /** body shape modifiers (MakeHuman bodyshapes) */
+  shape: Record<string, number>;
+  /** personal tape / photo measurements */
+  girths: Partial<Record<GirthKeyT, { cm: number; fatKg: number; fatShare: number; source: 'tape' | 'photo'; date: string }>>;
+  /** face shape modifiers fitted from a selfie */
+  face: Record<string, number>;
+  faceTexture?: string | null;
+  faceLandmarks?: number[] | null;
+  faceMean?: string | null;
+}
+
 export interface Profile {
   name: string;
   sex: Sex;
@@ -252,6 +274,7 @@ export interface Profile {
   calibrate: boolean;
   food: FoodPrefs;
   training: TrainingPrefs;
+  avatar?: AvatarSettings;
 }
 
 export interface PlannedExercise {

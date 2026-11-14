@@ -9,6 +9,7 @@ export function Sheet({
   children,
   footer,
   full,
+  half,
   right,
 }: {
   open: boolean;
@@ -17,6 +18,7 @@ export function Sheet({
   children: ReactNode;
   footer?: ReactNode;
   full?: boolean;
+  half?: boolean;
   right?: ReactNode;
 }) {
   const closeRef = useRef(onClose);
@@ -28,8 +30,8 @@ export function Sheet({
   if (!open) return null;
   return (
     <>
-      <div className="sheet-backdrop" onClick={onClose} />
-      <div className={`sheet ${full ? 'full' : ''}`} role="dialog">
+      <div className={`sheet-backdrop ${half ? 'light' : ''}`} onClick={onClose} />
+      <div className={`sheet ${full ? 'full' : ''} ${half ? 'half' : ''}`} role="dialog">
         <div className="sheet-head">
           <div className="sheet-handle" />
           {title !== undefined && (

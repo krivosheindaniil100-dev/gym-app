@@ -15,6 +15,11 @@
  */
 import type { Sex } from '../lib/types';
 
+export type FatZone = 'belly' | 'flanks' | 'chest' | 'back' | 'glutes' | 'hips' | 'thighs' | 'arms';
+
+/** Personal fat storage pattern: multipliers per zone (1 = population average). */
+export type FatPattern = Partial<Record<FatZone, number>>;
+
 export interface BodyInput {
   sex: Sex;
   heightCm: number;
@@ -22,6 +27,8 @@ export interface BodyInput {
   fatKg: number;
   ffm: number;
   smm?: number;
+  age?: number;
+  pattern?: FatPattern;
 }
 
 export type Vec3 = [number, number, number];
@@ -75,6 +82,9 @@ export interface BodyInfo {
   armFatMm: number;
   thighFatMm: number;
   armAngleDeg: number;
+  /** subcutaneous fat (kg) per zone – drives regional shape of the realistic model */
+  zoneFat: { glutes: number; breasts: number; thigh: number; upperArm: number; calf: number; neckFace: number; belly: number };
+  faceFatMm: number;
   /** right shoulder pivot (m) */
   shoulder: Vec3;
   muscleScale: number;
@@ -278,10 +288,23 @@ function splitFat(ref: SexRef, fatKg: number, ffm: number, sex: Sex): FatSplit {
   return { sat, vat, essential };
 }
 
-/** Depot weights slightly depend on adiposity (android shift with growing fat in men). */
-function depotWeights(ref: SexRef, sex: Sex, fatKg: number) {
-  const ws = ref.depots.map((d) => d.w);
+/** Which depot index belongs to which personal zone (per sex). */
+const DEPOT_ZONES: Record<Sex, FatZone[]> = {
+  male: ['belly', 'flanks', 'chest', 'back', 'flanks', 'hips'],
+  female: ['belly', 'hips', 'chest', 'back', 'flanks'],
+};
+
+/** Depot weights slightly depend on adiposity (android shift with growing fat in men) and on the personal pattern. */
+function depotWeights(ref: SexRef, sex: Sex, fatKg: number, pattern?: FatPattern) {
+  const ws = ref.depots.map((d, i) => d.w * (pattern?.[DEPOT_ZONES[sex][i]] ?? 1));
   const lf = { ...ref.limbFat };
+  if (pattern) {
+    lf.glutes *= pattern.glutes ?? 1;
+    lf.thigh *= pattern.thighs ?? 1;
+    lf.upperArm *= pattern.arms ?? 1;
+    lf.forearm *= pattern.arms ?? 1;
+    lf.breasts *= pattern.chest ?? 1;
+  }
   const shift = clamp((fatKg - ref.fat) / ref.fat, -0.6, 1.5);
   if (sex === 'male') {
     ws[0] *= 1 + 0.1 * shift; // belly
@@ -359,7 +382,7 @@ export function buildBody(input: BodyInput): BodySpec {
   const refSplit = splitFat(ref, ref.fat, ref.ffm, sex);
   const split = splitFat(ref, fatKg, ffm, sex);
   const refW = depotWeights(ref, sex, ref.fat);
-  const W = depotWeights(ref, sex, fatKg);
+  const W = depotWeights(ref, sex, fatKg, input.pattern);
   const vatDepot = sex === 'male' ? { yc: 0.6, sigma: 0.058 } : { yc: 0.585, sigma: 0.05 };
 
   // ── Torso stations ──
@@ -732,6 +755,16 @@ export function buildBody(input: BodyInput): BodySpec {
     armFatMm: uaT * 1000,
     thighFatMm: thighT * 1000,
     armAngleDeg: armAngle,
+    zoneFat: {
+      glutes: sat * W.lf.glutes,
+      breasts: sat * W.lf.breasts,
+      thigh: sat * W.lf.thigh,
+      upperArm: sat * W.lf.upperArm,
+      calf: sat * W.lf.calf,
+      neckFace: sat * W.lf.neckFace,
+      belly: sat * W.ws[0],
+    },
+    faceFatMm: faceT * 1000,
     shoulder: [shoulder[0], shoulder[1], shoulder[2]],
     muscleScale,
     levels: {

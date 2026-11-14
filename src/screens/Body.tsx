@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react';
-import { AlertTriangle, Flame, Ghost, History, Info, Plus, QrCode, Ruler, Settings as Gear, TrendingDown, TrendingUp } from 'lucide-react';
-import BodyViewer from '../body/BodyViewer';
-import type { BodyInput } from '../body/model';
-import type { Girth } from '../body/measure';
+import { AlertTriangle, Flame, Ghost, History, Info, Plus, QrCode, Ruler, ScanFace, Settings as Gear, TrendingDown, TrendingUp, UserRound } from 'lucide-react';
+import HumanViewer from '../human/HumanViewer';
+import type { Girth } from '../human/human.worker';
 import { buildBody } from '../body/model';
 import { measureBody } from '../body/measure';
+import { appearanceOf, avatarOf, humanInputFor } from '../human/avatar';
+import AvatarSheet from './Avatar';
+import PhotoFitSheet from './PhotoFit';
+import FaceFitSheet from './FaceFit';
 import { useApp } from '../lib/store';
 import { useLedgerInput, useLive, useNow, useTargets, useBias } from '../lib/hooks';
 import { bmi, compFromMeasurement, dailyBalances, fatCategory, ffmi, forecast, KCAL_PER_KG_FAT, liveState, recentAvgBalance, sortedMeasurements, type Composition } from '../lib/energy';
@@ -18,10 +21,6 @@ import type { Tab } from '../App';
 
 const FORECAST_DAYS = 84;
 
-function toInput(sex: 'male' | 'female', heightCm: number, c: Composition): BodyInput {
-  const r = (v: number, s: number) => Math.round(v / s) * s;
-  return { sex, heightCm, weight: r(c.weight, 0.01), fatKg: r(c.fatKg, 0.01), ffm: r(c.ffm, 0.01), smm: r(c.smm, 0.01) };
-}
 
 export default function BodyScreen({ active, onNavigate }: { active: boolean; onNavigate: (t: Tab) => void }) {
   const now = useNow(30000);
@@ -37,7 +36,10 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
   const [t, setT] = useState(0); // days relative to today
   const [rings, setRings] = useState(false);
   const [compare, setCompare] = useState(false);
-  const [view, setView] = useState<{ name: 'front' | 'side' | 'back'; nonce: number }>();
+  const [view, setView] = useState<{ name: 'front' | 'side' | 'back' | 'face'; nonce: number }>();
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [photoOpen, setPhotoOpen] = useState(false);
+  const [faceOpen, setFaceOpen] = useState(false);
   const [girths, setGirths] = useState<Girth[]>([]);
   const [qr, setQr] = useState<QrParse | null>(null);
   const [mOpen, setMOpen] = useState(false);
@@ -62,22 +64,30 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
     return { comp: fc, mode: 'forecast', label: fmtDay(addDays(dayKey(now), t), true) };
   }, [t, live, input, bias, now.getTime(), pace?.avg]);
 
-  const bodyInput = shown ? toInput(profile.sex, profile.heightCm, shown.comp) : null;
+  const bodyInput = shown ? humanInputFor(profile, shown.comp) : null;
   const ghostInput = useMemo(() => {
     if (!compare || !live) return null;
-    if (t === 0 && first) return toInput(profile.sex, profile.heightCm, compFromMeasurement(first));
-    return toInput(profile.sex, profile.heightCm, live);
-  }, [compare, t, live?.fatKg, first?.id, profile.sex, profile.heightCm]);
+    if (t === 0 && first) return humanInputFor(profile, compFromMeasurement(first));
+    return humanInputFor(profile, live);
+  }, [compare, t, live?.fatKg, first?.id, profile]);
+  const appearance = appearanceOf(avatarOf(profile));
 
-  // start-of-journey girths for comparison
-  const startGirths = useMemo(() => {
-    if (!first) return null;
+  // physics girth ratios start → shown (to show how much each girth changed since the start)
+  const startRatio = useMemo(() => {
+    if (!first || !shown) return null;
     try {
-      return measureBody(buildBody(toInput(profile.sex, profile.heightCm, compFromMeasurement(first))));
+      const a = measureBody(buildBody(humanInputFor(profile, compFromMeasurement(first))));
+      const b = measureBody(buildBody(humanInputFor(profile, shown.comp)));
+      const r: Record<string, number> = {};
+      for (const g of b) {
+        const s0 = a.find((x) => x.key === g.key);
+        if (s0) r[g.key] = s0.cm / g.cm;
+      }
+      return r;
     } catch {
       return null;
     }
-  }, [first?.id, profile.sex, profile.heightCm]);
+  }, [first?.id, shown?.comp.fatKg, shown?.comp.ffm, profile.sex, profile.heightCm, profile.avatar?.pattern]);
 
   const today = dayKey(now);
   const todayBal = useMemo(() => dailyBalances(input, today, today, bias)[0], [input, today, now.getTime(), bias]);
@@ -122,6 +132,9 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
           <button className="icon-btn accent" onClick={startQr} aria-label="Сканировать QR">
             <QrCode size={20} />
           </button>
+          <button className="icon-btn" onClick={() => setAvatarOpen(true)} aria-label="Мой аватар">
+            <UserRound size={20} />
+          </button>
           <button className="icon-btn" onClick={() => setSettings(true)} aria-label="Настройки">
             <Gear size={20} />
           </button>
@@ -129,7 +142,7 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
       </div>
 
       <div className="hero">
-        <BodyViewer input={bodyInput} ghost={ghostInput} showRings={rings} view={view} onMeasured={(_, g) => setGirths(g)} />
+        <HumanViewer input={bodyInput} ghost={ghostInput} appearance={appearance} showRings={rings} view={view} onMeasured={(_, g) => setGirths(g)} />
         <div className="hero-overlay">
           <div className="hero-stats">
             <div>
@@ -172,6 +185,9 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
                 {v === 'front' ? 'Спереди' : v === 'side' ? 'Сбоку' : 'Сзади'}
               </button>
             ))}
+            <button className={view?.name === 'face' ? 'on' : ''} onClick={() => setView({ name: 'face', nonce: Date.now() })} aria-label="Лицо">
+              <ScanFace size={16} />
+            </button>
             <span className="sep" />
             <button className={rings ? 'on' : ''} onClick={() => setRings(!rings)} aria-label="Обхваты">
               <Ruler size={16} />
@@ -324,11 +340,14 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
       {girths.length > 0 && (
         <div className="card">
           <div className="card-title">
-            Обхваты модели <span className="badge">оценка</span>
+            Обхваты модели
+            <button className="link" onClick={() => setAvatarOpen(true)}>
+              ввести свои
+            </button>
           </div>
           {girths.map((g) => {
-            const s = startGirths?.find((x) => x.key === g.key);
-            const d = s ? g.cm - s.cm : 0;
+            const r = startRatio?.[g.key];
+            const d = r ? g.cm - g.cm * r : 0;
             return (
               <div className="kv" key={g.key}>
                 <span className="k">{g.label}</span>
@@ -367,6 +386,16 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
       </div>
 
       <MeasurementSheet open={mOpen} onClose={() => setMOpen(false)} parsed={qr} />
+      <AvatarSheet
+        open={avatarOpen}
+        onClose={() => setAvatarOpen(false)}
+        live={live}
+        girthsNow={Object.fromEntries(girths.map((g) => [g.key, g.cm]))}
+        onPhotoFit={() => (setAvatarOpen(false), setPhotoOpen(true))}
+        onFaceFit={() => (setAvatarOpen(false), setFaceOpen(true))}
+      />
+      <PhotoFitSheet open={photoOpen} onClose={() => setPhotoOpen(false)} live={live} />
+      <FaceFitSheet open={faceOpen} onClose={() => setFaceOpen(false)} />
       <SettingsSheet open={settings} onClose={() => setSettings(false)} />
     </div>
   );
