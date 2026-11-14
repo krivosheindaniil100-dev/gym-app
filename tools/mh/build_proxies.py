@@ -452,12 +452,22 @@ def find_pupil(im):
 EYE_CROP_HALF = 0.285  # half size (uv) of the square cut around the pupil; the uv island radius is 0.267
 
 
-def eye_texture(src, dst, size, quality):
+def eye_texture(src, dst, size, quality, hue_shift_deg=0.0, sat_scale=1.0):
+    """Square cut around the pupil. hue_shift_deg / sat_scale recolour the iris only (saturated texels near the pupil):
+    MakeHuman's "brown" iris is a blood red-brown (hue 10 deg, saturation 0.95) that reads as red eyes when lit."""
     im = Image.open(src).convert('RGB')
     pu, pv = find_pupil(Image.open(src))
     w = im.size[0]
     box = ((pu - EYE_CROP_HALF) * w, (1 - pv - EYE_CROP_HALF) * w, (pu + EYE_CROP_HALF) * w, (1 - pv + EYE_CROP_HALF) * w)
     crop = im.resize((size, size), Image.LANCZOS, box=box)
+    if hue_shift_deg or sat_scale != 1.0:
+        hsv = np.asarray(crop.convert('HSV')).astype(np.float64)
+        y, x = np.mgrid[0:size, 0:size]
+        r = np.hypot((x + 0.5) / size - 0.5, (y + 0.5) / size - 0.5)
+        k = np.clip((0.30 - r) / 0.05, 0, 1) * np.clip((hsv[:, :, 1] / 255.0 - 0.35) / 0.25, 0, 1)  # iris weight
+        hsv[:, :, 0] = (hsv[:, :, 0] + k * hue_shift_deg * 255.0 / 360.0) % 256
+        hsv[:, :, 1] *= 1 - k * (1 - sat_scale)
+        crop = Image.fromarray(np.clip(np.round(hsv), 0, 255).astype(np.uint8), 'HSV').convert('RGB')
     return save_webp(crop, dst, quality), (pu, pv)
 
 
@@ -703,7 +713,8 @@ def main():
                 if col == 'brown' and args.eye_hires and os.path.exists(args.eye_hires):
                     src, size = Path(args.eye_hires), 512
                 dst = tex_dir / ('eye_%s.webp' % col)
-                n, pupil = eye_texture(src, dst, size, q)
+                # brown: shift the iris from red-brown to a natural dark brown
+                n, pupil = eye_texture(src, dst, size, q, *((17.0, 0.72) if col == 'brown' else ()))
                 tex_bytes[dst.name] = n
                 textures[col] = 'tex/' + dst.name
             e, qerr = emit(name, 'eyes', a['label'], a['src'], p_rest, ref, w, off, ball_faces, ball_uv, den, hw,
