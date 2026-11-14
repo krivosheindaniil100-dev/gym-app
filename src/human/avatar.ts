@@ -4,10 +4,10 @@ import type { HumanInput } from './fit';
 import type { Appearance } from './HumanViewer';
 
 export const DEFAULT_AVATAR: AvatarSettings = {
-  skinTone: '#c9906f',
-  eyeColor: '#5b4632',
+  skinTone: '#c39880',
+  eyeColor: 'brown',
   hairColor: '#2b2119',
-  hairStyle: 'short',
+  hairStyle: 'buzz',
   ethnic: { african: 0.05, asian: 0.1, caucasian: 0.85 },
   pattern: {},
   shape: {},
@@ -17,11 +17,13 @@ export const DEFAULT_AVATAR: AvatarSettings = {
 };
 
 export function avatarOf(p: Profile): AvatarSettings {
-  return { ...DEFAULT_AVATAR, ...(p.avatar ?? {}) };
+  const a = { ...DEFAULT_AVATAR, ...(p.avatar ?? {}) };
+  if (!p.avatar?.hairStyle) a.hairStyle = p.sex === 'female' ? 'long01' : 'buzz';
+  return a;
 }
 
 export function appearanceOf(a: AvatarSettings): Appearance {
-  return { skinTone: a.skinTone, eyeColor: a.eyeColor, hairColor: a.hairColor, hairStyle: a.hairStyle, faceTexture: a.faceTexture, faceLandmarks: a.faceLandmarks, faceMean: a.faceMean };
+  return { skinTone: a.skinTone, eyeColor: a.eyeColor, hairColor: a.hairColor, hairStyle: a.hairStyle, brows: a.brows || null, faceTexture: a.faceTexture, faceLandmarks: a.faceLandmarks, faceMean: a.faceMean };
 }
 
 export function humanInputFor(p: Profile, c: Composition): HumanInput {
@@ -50,8 +52,28 @@ export function humanInputFor(p: Profile, c: Composition): HumanInput {
 /** How much of a personal girth excess is fat (default per zone). */
 export const FAT_SHARE: Record<string, number> = { neck: 0.4, chest: 0.5, waist: 0.85, hips: 0.7, thigh: 0.6, calf: 0.3, arm: 0.5 };
 
-export const SKIN_TONES = ['#f1c7aa', '#e0ac8b', '#c9906f', '#a86e4f', '#7f4f35', '#56352a'];
-export const EYE_COLORS = ['#5b4632', '#3b2a1e', '#6c7a3c', '#4f7ca8', '#7f8e9c', '#2a1b12'];
+export const SKIN_TONES = ['#edc8b0', '#dcae93', '#c39880', '#a9795c', '#7d5038', '#553529'];
+/** iris textures shipped with the model */
+export const EYE_OPTIONS: { v: string; l: string; c: string }[] = [
+  { v: 'brown', l: 'Карие', c: '#5b3a22' },
+  { v: 'brownlight', l: 'Светло-карие', c: '#8a6238' },
+  { v: 'green', l: 'Зелёные', c: '#6c7a3c' },
+  { v: 'blue', l: 'Голубые', c: '#4f7ca8' },
+  { v: 'grey', l: 'Серые', c: '#7f8e9c' },
+];
+export const HAIR_STYLES: { v: string; l: string }[] = [
+  { v: 'buzz', l: 'Под машинку' },
+  { v: 'short02', l: 'Короткие' },
+  { v: 'none', l: 'Без волос' },
+  { v: 'ponytail01', l: 'Хвост' },
+  { v: 'long01', l: 'Длинные' },
+  { v: 'bob01', l: 'Каре' },
+];
+export const BROW_OPTIONS: { v: string; l: string }[] = [
+  { v: '', l: 'Авто' },
+  { v: 'eyebrow001', l: 'Густые' },
+  { v: 'eyebrow010', l: 'Тонкие' },
+];
 export const HAIR_COLORS = ['#141010', '#2b2119', '#4a3222', '#7a5434', '#b08a5a', '#8a8a8a'];
 
 export const BODY_SHAPES: Record<'male' | 'female', { key: string; label: string; hint: string }[]> = {

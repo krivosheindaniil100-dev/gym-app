@@ -244,9 +244,13 @@ export type GirthKeyT = 'neck' | 'chest' | 'waist' | 'hips' | 'thigh' | 'calf' |
 
 export interface AvatarSettings {
   skinTone: string;
+  /** iris texture key: brown | brownlight | blue | green | grey (older saves may hold a hex colour) */
   eyeColor: string;
   hairColor: string;
-  hairStyle: 'none' | 'short' | 'buzz';
+  /** 'none' | 'buzz' | hair model name (short02, short04, ponytail01, long01, bob01); older saves: 'short' */
+  hairStyle: string;
+  /** eyebrow model name; empty = by sex */
+  brows?: string | null;
   ethnic: { african: number; asian: number; caucasian: number };
   /** where this person stores fat (multipliers, 1 = average) */
   pattern: Partial<Record<FatZoneKey, number>>;

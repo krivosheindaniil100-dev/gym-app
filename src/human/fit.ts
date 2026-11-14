@@ -83,7 +83,13 @@ function regionalModifiers(input: HumanInput, info: BodyInfo, refInfo: BodyInfo)
   const male = input.sex === 'male';
   const rel = (a: number, b: number) => (b > 0.01 ? a / b - 1 : 0);
   const mus = info.muscleScale - 1;
+  // abdominal wall: visibly toned when lean (more so with muscle), slack when fat
+  const bf = (input.fatKg / input.weight) * 100;
+  const lean = (male ? 15 - bf : 23 - bf) / 8;
+  const tone = clamp(lean * (0.75 + clamp(mus * 2.5, -0.35, 0.5)), -0.7, 1);
   const mods: Modifiers = {
+    'stomach/stomach-tone': tone,
+    'pelvis/pelvis-tone': tone * 0.6,
     'buttocks/buttocks-volume': clamp(rel(z.glutes, r.glutes) * 0.55, -0.8, 1),
     'armslegs/l-upperarm-fat': clamp(rel(z.upperArm, r.upperArm) * 0.5, -1, 1),
     'armslegs/r-upperarm-fat': clamp(rel(z.upperArm, r.upperArm) * 0.5, -1, 1),

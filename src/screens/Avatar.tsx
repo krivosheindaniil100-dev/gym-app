@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react';
 import { Camera, Info, Ruler, ScanFace, Sparkles } from 'lucide-react';
 import { useApp } from '../lib/store';
 import { NumField, Seg, Sheet, fmt, toast } from '../ui/kit';
-import { avatarOf, BODY_SHAPES, EYE_COLORS, FAT_SHARE, HAIR_COLORS, SKIN_TONES, ZONES } from '../human/avatar';
+import { avatarOf, BODY_SHAPES, BROW_OPTIONS, EYE_OPTIONS, FAT_SHARE, HAIR_COLORS, HAIR_STYLES, SKIN_TONES, ZONES } from '../human/avatar';
+import { eyeKey } from '../human/HumanViewer';
+import { Chips } from '../ui/kit';
 import { GIRTH_KEYS, GIRTH_LABEL, type GirthKey } from '../human/fit';
 import type { AvatarSettings } from '../lib/types';
 import type { Composition } from '../lib/energy';
@@ -175,20 +177,30 @@ export default function AvatarSheet({
           <div className="section-label">Тон кожи</div>
           <Swatches value={a.skinTone} options={SKIN_TONES} onChange={(v) => set({ skinTone: v })} />
           <div className="section-label">Глаза</div>
-          <Swatches value={a.eyeColor} options={EYE_COLORS} onChange={(v) => set({ eyeColor: v })} />
-          <div className="section-label">Волосы</div>
-          <Swatches value={a.hairColor} options={HAIR_COLORS} onChange={(v) => set({ hairColor: v })} />
-          <div style={{ marginTop: 10 }}>
-            <Seg
-              value={a.hairStyle}
-              options={[
-                { v: 'short', l: 'Короткие' },
-                { v: 'buzz', l: 'Под машинку' },
-                { v: 'none', l: 'Без волос' },
-              ]}
-              onChange={(v) => set({ hairStyle: v })}
-            />
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+            {EYE_OPTIONS.map((e) => (
+              <button
+                key={e.v}
+                onClick={() => set({ eyeColor: e.v })}
+                aria-label={e.l}
+                title={e.l}
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: '50%',
+                  background: `radial-gradient(circle, #0b0705 0 26%, ${e.c} 28% 62%, #e9e4de 64%)`,
+                  border: eyeKey(a.eyeColor) === e.v ? '2px solid var(--accent)' : '1px solid var(--border-2)',
+                  boxShadow: eyeKey(a.eyeColor) === e.v ? '0 0 0 3px rgba(124,247,200,.25)' : 'none',
+                }}
+              />
+            ))}
           </div>
+          <div className="section-label">Причёска</div>
+          <Chips value={a.hairStyle === 'short' ? 'short02' : a.hairStyle} options={HAIR_STYLES} onChange={(v: string) => set({ hairStyle: v })} />
+          <div className="section-label">Цвет волос</div>
+          <Swatches value={a.hairColor} options={HAIR_COLORS} onChange={(v) => set({ hairColor: v })} />
+          <div className="section-label">Брови</div>
+          <Seg value={a.brows ?? ''} options={BROW_OPTIONS} onChange={(v) => set({ brows: v || null })} />
           <div className="section-label">Черты лица</div>
           <Seg
             value={a.ethnic.caucasian > 0.6 ? 'eu' : a.ethnic.asian > 0.6 ? 'as' : a.ethnic.african > 0.6 ? 'af' : 'mix'}

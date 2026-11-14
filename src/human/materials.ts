@@ -4,6 +4,7 @@
  *  • createSkinMaterial      – pre-integrated-style subsurface skin on top of MeshPhysicalMaterial (custom RE_Direct)
  *  • createCapsuleField      – analytic capsule ambient occlusion shared by skin / hair / floor
  *  • createCapsuleFitter     – fits the ≤24 body capsules from the mesh itself (rest coords → current pose), no skeleton needed
+ *  • computeVertexCavity     – static per-vertex crease occlusion (attribute aCavity) for what capsules cannot see
  *  • createEyeMaterial       – procedural / textured iris, limbal ring, lid occlusion, cornea highlight (clearcoat)
  *  • createHairMaterial      – alpha hair cards, Kajiya–Kay diffuse + two shifted highlights (Scheuermann 2004)
  *  • createBrowLashMaterial  – cheap alpha cards for brows / lashes
@@ -38,7 +39,11 @@ export interface TierSettings {
   pixelRatioCap: number;
   /** key-light shadow map size (0 = no shadow map, capsule occlusion only) */
   shadowMapSize: number;
-  /** PCF radius in shadow-map texels (r187: 5 Vogel taps × hardware 2×2 PCF) */
+  /**
+   * PCF radius in shadow-map texels (r187: 5 Vogel taps × hardware 2×2 PCF, rotated per pixel). The map is kept small
+   * and the radius large on purpose: a softbox key gives ~1–2 cm penumbrae, a 2048² map with a small radius looks like a
+   * bare bulb (finger shadows drawn as hard streaks across the thigh).
+   */
   shadowRadius: number;
   /** where the capsule occlusion loop runs for the body */
   ao: 'vertex' | 'fragment';
@@ -53,9 +58,9 @@ export interface TierSettings {
 }
 
 export const QUALITY_TIERS: Record<QualityTier, TierSettings> = {
-  high: { pixelRatioCap: 2, shadowMapSize: 2048, shadowRadius: 5, ao: 'vertex', microDetail: true, dualLobeIBL: true, translucency: true, lights: 4 },
-  medium: { pixelRatioCap: 1.75, shadowMapSize: 1024, shadowRadius: 3, ao: 'vertex', microDetail: true, dualLobeIBL: false, translucency: true, lights: 4 },
-  low: { pixelRatioCap: 1.25, shadowMapSize: 512, shadowRadius: 2, ao: 'vertex', microDetail: false, dualLobeIBL: false, translucency: false, lights: 3 },
+  high: { pixelRatioCap: 2, shadowMapSize: 1024, shadowRadius: 6, ao: 'vertex', microDetail: true, dualLobeIBL: true, translucency: true, lights: 4 },
+  medium: { pixelRatioCap: 1.75, shadowMapSize: 1024, shadowRadius: 4.5, ao: 'vertex', microDetail: true, dualLobeIBL: false, translucency: true, lights: 4 },
+  low: { pixelRatioCap: 1.25, shadowMapSize: 512, shadowRadius: 3, ao: 'vertex', microDetail: false, dualLobeIBL: false, translucency: false, lights: 3 },
 };
 
 /** Recommended renderer set-up for the studio look. */
@@ -63,8 +68,11 @@ export const STUDIO_RENDER_SETTINGS = {
   /** WebGLRenderer constructor parameters (MSAA is required for alpha-to-coverage hair cards) */
   context: { antialias: true, alpha: true, powerPreference: 'high-performance' as const },
   outputColorSpace: THREE.SRGBColorSpace,
-  /** ACES keeps skin saturated and contrasty; AgX/Neutral were compared in look-dev (see report) */
-  toneMapping: THREE.ACESFilmicToneMapping as THREE.ToneMapping,
+  /**
+   * Khronos PBR Neutral: compared on the look-dev page against ACES (washes light skin to pale cream on the key side)
+   * and AgX (grey, lifeless skin); Neutral keeps the albedo hue up to ~0.8 and only then compresses the highlights.
+   */
+  toneMapping: THREE.NeutralToneMapping as THREE.ToneMapping,
   toneMappingExposure: 1.0,
   /** PCFSoftShadowMap was removed in r186+; PCFShadowMap already filters with a rotated Vogel disk */
   shadowMapType: THREE.PCFShadowMap as THREE.ShadowMapType,
@@ -253,7 +261,7 @@ export function createCapsuleField(): CapsuleField {
     uCapB: u(new Float32Array(CAPSULE_MAX * 4)),
     uCapN: u(0),
     uCapGround: u(new THREE.Vector4(0, 1, 0, 0)),
-    uCapP: u(new THREE.Vector4(0.9, 0.25, 0.5, 0.18)),
+    uCapP: u(new THREE.Vector4(1.2, 0.25, 0.5, 0.18)),
     uGCapA: u(new Float32Array(GROUND_CAPSULE_MAX * 4)),
     uGCapB: u(new Float32Array(GROUND_CAPSULE_MAX * 4)),
     uGCapN: u(0),
@@ -498,31 +506,108 @@ export function createCapsuleFitter(rest: ArrayLike<number>): CapsuleFitter {
 }
 
 /**
- * Per-vertex mean curvature magnitude (1/m) for the scatter width, as an alternative to screen-space derivatives.
- * Mean over incident edges of |Δn| / |Δp|. O(indices). Assign as attribute `aCurv` and use curvature: 'attribute'.
+ * Static per-vertex concavity for creases the capsules cannot see (eye sockets, nostrils, lips, ears, navel, folds,
+ * between fingers and toes). Assign the result as attribute `aCavity` (float) and create the skin with `cavity: true`.
+ *
+ * Method: K umbrella-Laplacian smoothing steps; a vertex in a concavity moves outwards along its normal, by
+ * ≈ K·λ·e²·H/2 (e = local edge length, H = mean curvature), so dividing by K·λ·e²/2 gives a curvature in 1/m that is
+ * independent of the tessellation density. Returned: clamp(H / reference, −1, 1), positive = concave.
+ * Cost: O(K · triangles), ≈ 15 ms for the 110k-triangle body – call it once when the mesh is created (the creases
+ * hardly move when the body morphs). Needs a welded mesh: with UV-seam-split vertices compute it on the welded
+ * vertices and expand the result.
  */
-export function computeVertexCurvature(positions: ArrayLike<number>, normals: ArrayLike<number>, index: ArrayLike<number>, out?: Float32Array): Float32Array {
+export function computeVertexCavity(positions: ArrayLike<number>, index: ArrayLike<number>, opts: { iterations?: number; reference?: number; out?: Float32Array } = {}): Float32Array {
   const n = Math.floor(positions.length / 3);
-  const curv = out ?? new Float32Array(n);
-  curv.fill(0);
-  const cnt = new Uint16Array(n);
-  const edge = (i: number, j: number) => {
-    const dp = Math.hypot(positions[i * 3] - positions[j * 3], positions[i * 3 + 1] - positions[j * 3 + 1], positions[i * 3 + 2] - positions[j * 3 + 2]);
-    if (dp < 1e-9) return;
-    const dn = Math.hypot(normals[i * 3] - normals[j * 3], normals[i * 3 + 1] - normals[j * 3 + 1], normals[i * 3 + 2] - normals[j * 3 + 2]);
-    const k = dn / dp;
-    curv[i] += k;
-    curv[j] += k;
-    cnt[i]++;
-    cnt[j]++;
-  };
-  for (let f = 0; f + 2 < index.length; f += 3) {
-    edge(index[f], index[f + 1]);
-    edge(index[f + 1], index[f + 2]);
-    edge(index[f + 2], index[f]);
+  const K = opts.iterations ?? 10;
+  const href = opts.reference ?? 40;
+  const lambda = 0.6;
+  const out = opts.out ?? new Float32Array(n);
+  const p0 = Float32Array.from(positions);
+  const p = p0.slice();
+  const acc = new Float32Array(n * 3);
+  const nrm = new Float32Array(n * 3);
+  const e2 = new Float32Array(n);
+  const cnt = new Float32Array(n);
+  const nt = Math.floor(index.length / 3);
+  for (let f = 0; f < nt; f++) {
+    const a = index[f * 3] * 3,
+      b = index[f * 3 + 1] * 3,
+      c = index[f * 3 + 2] * 3;
+    const abx = p0[b] - p0[a],
+      aby = p0[b + 1] - p0[a + 1],
+      abz = p0[b + 2] - p0[a + 2];
+    const acx = p0[c] - p0[a],
+      acy = p0[c + 1] - p0[a + 1],
+      acz = p0[c + 2] - p0[a + 2];
+    const bcx = acx - abx,
+      bcy = acy - aby,
+      bcz = acz - abz;
+    const nx = aby * acz - abz * acy,
+      ny = abz * acx - abx * acz,
+      nz = abx * acy - aby * acx;
+    const ab2 = abx * abx + aby * aby + abz * abz,
+      ac2 = acx * acx + acy * acy + acz * acz,
+      bc2 = bcx * bcx + bcy * bcy + bcz * bcz;
+    for (const v of [a, b, c]) {
+      nrm[v] += nx;
+      nrm[v + 1] += ny;
+      nrm[v + 2] += nz;
+      cnt[v / 3] += 2;
+    }
+    e2[a / 3] += ab2 + ac2;
+    e2[b / 3] += ab2 + bc2;
+    e2[c / 3] += ac2 + bc2;
   }
-  for (let i = 0; i < n; i++) if (cnt[i]) curv[i] /= cnt[i];
-  return curv;
+  for (let k = 0; k < K; k++) {
+    acc.fill(0);
+    for (let f = 0; f < nt; f++) {
+      const a = index[f * 3] * 3,
+        b = index[f * 3 + 1] * 3,
+        c = index[f * 3 + 2] * 3;
+      for (let d = 0; d < 3; d++) {
+        const pa = p[a + d],
+          pb = p[b + d],
+          pc = p[c + d];
+        acc[a + d] += pb + pc;
+        acc[b + d] += pa + pc;
+        acc[c + d] += pa + pb;
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      const w = cnt[i];
+      if (w === 0) continue;
+      const o = i * 3;
+      p[o] += lambda * (acc[o] / w - p[o]);
+      p[o + 1] += lambda * (acc[o + 1] / w - p[o + 1]);
+      p[o + 2] += lambda * (acc[o + 2] / w - p[o + 2]);
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    const nl = Math.hypot(nrm[o], nrm[o + 1], nrm[o + 2]);
+    if (cnt[i] === 0 || nl < 1e-20) {
+      out[i] = 0;
+      continue;
+    }
+    const along = ((p[o] - p0[o]) * nrm[o] + (p[o + 1] - p0[o + 1]) * nrm[o + 1] + (p[o + 2] - p0[o + 2]) * nrm[o + 2]) / nl;
+    const meanE2 = e2[i] / cnt[i];
+    const h = (2 * along) / (K * lambda * Math.max(meanE2, 1e-12));
+    out[i] = Math.max(-1, Math.min(1, h / href));
+  }
+  // two neighbour-averaging passes remove the tessellation noise of the estimate (acc is reused as scratch)
+  for (let pass = 0; pass < 2; pass++) {
+    const sum = acc.subarray(0, n).fill(0);
+    for (let f = 0; f < nt; f++) {
+      const a = index[f * 3],
+        b = index[f * 3 + 1],
+        c = index[f * 3 + 2];
+      sum[a] += out[b] + out[c];
+      sum[b] += out[a] + out[c];
+      sum[c] += out[a] + out[b];
+    }
+    for (let i = 0; i < n; i++) if (cnt[i] > 0) out[i] = 0.5 * out[i] + 0.5 * (sum[i] / cnt[i]);
+  }
+  return out;
 }
 
 /* ════════════════════════════════════════════════════════════════════════════════════════════
@@ -648,8 +733,10 @@ export interface SkinMaterialOptions {
   /** capsule occlusion field; `ao` selects where the loop runs (default from the tier) */
   capsules?: CapsuleField | null;
   ao?: 'vertex' | 'fragment' | 'off';
-  /** scatter width source: screen-space derivatives (default), attribute aCurv (1/m) or a constant */
-  curvature?: 'derivative' | 'attribute' | 'constant';
+  /** scatter width source: screen-space derivatives (default) or a constant (uScatterP.w, 1/m) */
+  curvature?: 'derivative' | 'constant';
+  /** the geometry has attribute aCavity (float, see computeVertexCavity) → crease occlusion. Default false. */
+  cavity?: boolean;
   /** selfie projection hook: attributes aFaceUV (vec2) + aFaceW (float) and uniforms uFaceTex / uFaceOn / uFaceMean */
   faceProjection?: boolean;
   /** procedural scalp stubble / shadow under hair cards (rest-space hairline) */
@@ -684,13 +771,15 @@ export interface SkinUniforms {
   uTransColor: Uniform<THREE.Color>;
   /** x capsule AO on the shadowed key, y on lights without a shadow map, z curvature for full thinness (1/m), w curvature where thinness starts */
   uAoP: Uniform<THREE.Vector4>;
+  /** x occlusion in creases (aCavity), y specular occlusion in creases */
+  uCavity: Uniform<THREE.Vector2>;
   uFemale: Uniform<number>;
   uFaceTex: Uniform<THREE.Texture | null>;
   uFaceOn: Uniform<number>;
   uFaceMean: Uniform<THREE.Color>;
   uScalpColor: Uniform<THREE.Color>;
   uScalpAmt: Uniform<number>;
-  /** debug view: 0 off, 1 occlusion, 2 albedo, 3 wrap width, 4 shadow */
+  /** debug view: 0 off, 1 occlusion (capsules × creases), 2 albedo, 3 wrap width, 4 (thinness, cloth, specular cavity) */
   uDebug: Uniform<number>;
 }
 
@@ -730,9 +819,9 @@ const SKIN_VERTEX_PARS = /* glsl */ `
     red += 0.9 * skBlob(m, vec3(2.75, 3.85, -0.2), 0.45);                                   // elbows
     red += 0.55 * smoothstep(0.0, 0.6, dot(m - vec3(4.31, 2.45, 1.76), vec3(0.33, -0.67, 0.66))) * step(3.3, m.x); // hands
     red += 0.6 * (1.0 - smoothstep(-7.75, -7.3, r.y));                                      // feet
-    red += 0.5 * skBlob(m, vec3(0.5, 6.93, 1.05), 0.36);                                    // cheeks
-    red += 0.6 * skBlob(r, vec3(0.0, 6.93, 1.62), 0.22);                                    // nose tip
-    red += 0.75 * skBlob(m, vec3(0.86, 7.2, 0.3), 0.3);                                     // ears
+    red += 0.45 * skBlob(m, vec3(0.5, 6.9, 1.05), 0.42);                                    // cheeks
+    red += 0.32 * skBlob(r, vec3(0.0, 6.93, 1.62), 0.24);                                   // nose tip
+    red += 0.6 * skBlob(m, vec3(0.86, 7.2, 0.3), 0.3);                                      // ears
     red += 0.25 * skBlob(r, vec3(0.0, 6.5, 1.45), 0.3);                                     // chin
     red += 0.2 * skBlob(m, vec3(2.3, 5.0, 0.1), 0.5);                                       // shoulder caps
     float mottle = skNoise(r * 6.0) * 0.6 + skNoise(r * 17.0) * 0.4;
@@ -745,9 +834,9 @@ const SKIN_VERTEX_PARS = /* glsl */ `
   varying vec2 vFaceUV;
   varying float vFaceW;
 #endif
-#ifdef SKIN_CURV_ATTR
-  attribute float aCurv;
-  varying float vCurv;
+#ifdef SKIN_CAVITY
+  attribute float aCavity;
+  varying float vCavity;
 #endif
 #ifdef SKIN_AO_VERTEX
   varying float vCapVis;
@@ -767,8 +856,8 @@ const SKIN_VERTEX_BEGIN = /* glsl */ `
   vFaceUV = aFaceUV;
   vFaceW = aFaceW;
 #endif
-#ifdef SKIN_CURV_ATTR
-  vCurv = aCurv;
+#ifdef SKIN_CAVITY
+  vCavity = aCavity;
 #endif
 `;
 
@@ -819,8 +908,9 @@ uniform float uDebug;
   uniform vec3 uScalpColor;
   uniform float uScalpAmt;
 #endif
-#ifdef SKIN_CURV_ATTR
-  varying float vCurv;
+#ifdef SKIN_CAVITY
+  varying float vCavity;
+  uniform vec2 uCavity;
 #endif
 #ifdef SKIN_AO_VERTEX
   varying float vCapVis;
@@ -839,6 +929,7 @@ float gCloth = 0.0;        // fabric coverage
 float gAO = 1.0;           // capsule visibility
 float gSpecOcc = 1.0;      // micro cavity
 float gThin = 0.0;         // thin-region factor for back-scatter
+float gScalp = 0.0;        // stubble coverage (matte, no sheen)
 vec3 gWrap = vec3(0.0);    // per-channel wrap width
 vec3 gSmoothN = vec3(0.0, 0.0, 1.0);
 vec3 gMicro = vec3(0.5, 0.5, 0.5);
@@ -879,7 +970,7 @@ float scalpMask(vec3 r) {
   vec2 d = vec2(r.x, r.z - 0.6);
   float c = d.y / max(length(d), 1e-4);
   float hy = c > 0.0 ? mix(7.33, 7.8, pow(c, 1.4)) : mix(7.33, 6.92, pow(-c, 0.8));
-  float m = ssk(hy - 0.04, hy + 0.1, r.y + (skNoise(r * 25.0) - 0.5) * 0.07);
+  float m = ssk(hy - 0.1, hy + 0.22, r.y + (skNoise(r * 25.0) - 0.5) * 0.04);
   float ear = 1.0 - ssk(0.74, 0.8, abs(r.x));
   m *= mix(1.0, ear, 1.0 - ssk(7.45, 7.6, r.y));
   return m;
@@ -981,11 +1072,11 @@ const SKIN_ALBEDO = /* glsl */ `
   #else
     vec3 alb = uTone;
     #ifdef SKIN_ZONES
-      alb *= 0.93 + 0.14 * vZone.y;                                         // mottling
+      alb *= (0.92 + 0.16 * vZone.y) * mix(vec3(0.96, 1.0, 1.03), vec3(1.05, 0.98, 0.93), vZone.y);   // mottling: luminance + warm/cool drift
       alb = mix(alb, alb * vec3(1.10, 0.80, 0.76), vZone.x * 0.5);          // blood-rich areas
       float lips = vRest.z > 1.3 ? 1.0 - ssk(0.75, 1.05, length(vec2(vRest.x / 0.27, (vRest.y - 6.53) / 0.085))) : 0.0;
       float areola = vRest.z > 1.2 ? 1.0 - ssk(0.07, 0.13, length(vec2(abs(vRest.x) - 0.78, vRest.y - 3.86))) : 0.0;
-      alb = mix(alb, alb * vec3(0.92, 0.56, 0.54), lips * 0.6);
+      alb = mix(alb, alb * vec3(0.84, 0.47, 0.50), lips * 0.7);
       alb = mix(alb, alb * vec3(0.78, 0.55, 0.50), areola * 0.55);
     #endif
   #endif
@@ -1005,7 +1096,14 @@ const SKIN_ALBEDO = /* glsl */ `
   // ═══════════════════ END SELFIE FACE ALBEDO HOOK ═══════════════
 
   #ifdef SKIN_SCALP
-    alb = mix(alb, uScalpColor * (0.55 + 0.6 * gMicro.g), scalpMask(vRest) * uScalpAmt);
+  {
+    float sm = scalpMask(vRest);
+    gScalp = sm * uScalpAmt;
+    // skin seen between the hairs is shaded by them: darker and far less saturated than bare skin
+    float sl = dot(alb, vec3(0.2126, 0.7152, 0.0722));
+    vec3 under = mix(vec3(sl), alb, 0.35) * 0.7;
+    alb = mix(alb, mix(under, uScalpColor * (0.55 + 0.6 * gMicro.g), uScalpAmt), sm);
+  }
   #endif
 
   // fabric (underwear): coverage, bands, seams
@@ -1036,6 +1134,7 @@ const SKIN_ROUGHNESS = /* glsl */ `
       roughnessFactor *= 1.0 - 0.3 * (vRest.z > 1.3 ? 1.0 - ssk(0.75, 1.05, length(vec2(vRest.x / 0.27, (vRest.y - 6.53) / 0.085))) : 0.0);
     #endif
   #endif
+  roughnessFactor = mix(roughnessFactor, 0.8, gScalp);
   roughnessFactor = clamp(mix(roughnessFactor, uFabricP.x, gCloth), 0.08, 1.0);
 }
 `;
@@ -1062,17 +1161,22 @@ const SKIN_MATERIAL_SETUP = /* glsl */ `
   #elif defined( SKIN_AO_VERTEX )
     gAO = vCapVis;
   #endif
-  gSpecOcc = mix(1.0, clamp(gMicro.r * 1.5 + 0.1, 0.0, 1.0), uMicroP.w * skinK);
+  gSpecOcc = mix(1.0, clamp(gMicro.r * 1.5 + 0.1, 0.0, 1.0), uMicroP.w * skinK) * (1.0 - 0.65 * gScalp);
 
-  #if defined( SKIN_CURV_ATTR )
-    float curv = vCurv;
-  #elif defined( SKIN_CURV_DERIV )
+  #ifdef SKIN_CAVITY
+  {
+    float cav = smoothstep(0.1, 0.85, vCavity);   // the dead zone hides residual estimate noise on flat skin
+    gAO *= 1.0 - uCavity.x * cav;
+    gSpecOcc *= 1.0 - uCavity.y * cav;
+  }
+  #endif
+  #if defined( SKIN_CURV_DERIV )
     float curv = length(fwidth(nonPerturbedNormal)) / max(length(fwidth(vViewPosition)), 1e-6);
   #else
     float curv = uScatterP.w;
   #endif
   // wrap ≈ scatter distance / radius of curvature, clamped; green and blue scatter less than red
-  gWrap = clamp(uScatter.w * curv, uScatterP.x, uScatterP.y) * uScatter.xyz * skinK;
+  gWrap = clamp(uScatter.w * curv, uScatterP.x, uScatterP.y) * uScatter.xyz * skinK * (1.0 - 0.7 * gScalp);
   gThin = smoothstep(uAoP.w, uAoP.z, curv);
 }
 `;
@@ -1119,12 +1223,13 @@ export function createSkinMaterial(opts: SkinMaterialOptions = {}): SkinMaterial
     uMicro: u(micro),
     uMicroP: u(new THREE.Vector4(4, 0.00011, 0.1, 0.5)),
     uScatter: u(new THREE.Vector4(1.0, 0.42, 0.24, 0.0042)),
-    uScatterP: u(new THREE.Vector4(0.08, 0.6, 1.0, 25)),
+    uScatterP: u(new THREE.Vector4(0.08, 0.6, 0.5, 25)),
     uNormalBlend: u(new THREE.Vector3(0.75, 0.4, 0.2)),
-    uShadowTint: u(new THREE.Vector3(0.5, 0.18, 0.08)),
+    uShadowTint: u(new THREE.Vector3(0.32, 0.12, 0.05)),
     uLobe: u(new THREE.Vector3(1.12, 0.6, 0.22)),
     uTransColor: u(srgb('#ff3b1e')),
-    uAoP: u(new THREE.Vector4(0.45, 0.9, 170, 45)),
+    uAoP: u(new THREE.Vector4(0.45, 0.9, 230, 70)),
+    uCavity: u(new THREE.Vector2(0.6, 0.6)),
     uFemale: u(opts.female ? 1 : 0),
     uFaceTex: u<THREE.Texture | null>(null),
     uFaceOn: u(0),
@@ -1169,7 +1274,7 @@ export function createSkinMaterial(opts: SkinMaterialOptions = {}): SkinMaterial
     if (opts.scalp && restAttr) d.SKIN_SCALP = '';
     if (aoMode === 'vertex') d.SKIN_AO_VERTEX = '';
     if (aoMode === 'fragment') d.SKIN_AO_FRAGMENT = '';
-    if (curvature === 'attribute') d.SKIN_CURV_ATTR = '';
+    if (opts.cavity) d.SKIN_CAVITY = '';
     if (curvature === 'derivative') d.SKIN_CURV_DERIV = '';
     if (tier.dualLobeIBL) d.SKIN_DUAL_IBL = '';
     if (tier.translucency) d.SKIN_TRANSLUCENCY = '';
@@ -1282,6 +1387,8 @@ export interface EyeUniforms {
   uLid: Uniform<THREE.Vector4>;
   /** x iris concavity, y cornea bulge, z sclera flattening (fake scattering), w unused */
   uEyeN: Uniform<THREE.Vector4>;
+  /** softbox catch-light of the key (= first DirectionalLight): x cos(outer angle), y cos(inner angle), z intensity (0 = off) */
+  uCatch: Uniform<THREE.Vector3>;
 }
 
 export interface EyeMaterial {
@@ -1302,6 +1409,7 @@ uniform vec3 uSclera;
 uniform vec4 uEyeP;
 uniform vec4 uLid;
 uniform vec4 uEyeN;
+uniform vec3 uCatch;
 varying vec3 vEyeW;
 float gEyeAO = 1.0;
 float gIris = 0.0;
@@ -1394,6 +1502,15 @@ const EYE_AO_APPLY = /* glsl */ `
   reflectedLight.directSpecular *= gEyeAO;
   reflectedLight.indirectSpecular *= gEyeAO;
   #ifdef USE_CLEARCOAT
+    #if NUM_DIR_LIGHTS > 0
+    {
+      // Catch-light: the reflection of the key *softbox* (a ~25° wide source). The punctual key only gives a sub-pixel
+      // glint on a 12 mm sphere and the environment is kept dim (it is the fill), so the softbox image is drawn analytically.
+      vec3 Rv = reflect(-geometryViewDir, geometryClearcoatNormal);
+      float cl = smoothstep(uCatch.x, uCatch.y, dot(Rv, directionalLights[0].direction));
+      clearcoatSpecularDirect += directionalLights[0].color * (cl * uCatch.z);
+    }
+    #endif
     clearcoatSpecularIndirect *= mix(1.0, gEyeAO, 0.85);
     clearcoatSpecularDirect *= mix(1.0, gEyeAO, 0.6);
   #endif
@@ -1410,6 +1527,7 @@ export function createEyeMaterial(opts: EyeMaterialOptions = {}): EyeMaterial {
     uEyeP: u(new THREE.Vector4(opts.irisSize ?? 0.5, opts.pupil ?? 0.36, 0.75, 0.16)),
     uLid: u(new THREE.Vector4(0.36, 0.5, 0.82, 0.8)),
     uEyeN: u(new THREE.Vector4(0.85, 0.7, 0.35, 0)),
+    uCatch: u(new THREE.Vector3(0.955, 0.975, 0.55)),
   };
   const mat = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
@@ -1462,7 +1580,7 @@ export interface HairMaterialOptions {
   map?: THREE.Texture | null;
   /** base hair colour (sRGB); the texture only contributes its relative luminance */
   color?: THREE.ColorRepresentation;
-  /** mean luminance of the strand texture (linear), used to normalise the tint. Default 0.25. */
+  /** mean linear luminance of the opaque texels of the strand texture, used to normalise the tint. Default 0.5 (public/human/tex/hair_*.webp ≈ 0.54). */
   texLuminance?: number;
   /** MSAA available (renderer created with antialias: true) → alpha-to-coverage; otherwise a hard alpha test */
   msaa?: boolean;
@@ -1565,7 +1683,7 @@ export function createHairMaterial(opts: HairMaterialOptions = {}): HairMaterial
   const capsules = opts.capsules ?? null;
   const uniforms: HairUniforms = {
     uHairColor: u(srgb(opts.color ?? '#2b2119')),
-    uHairP: u(new THREE.Vector4(1 / Math.max(opts.texLuminance ?? 0.25, 0.01), 0.75, opts.rootAt === undefined ? 0 : 0.55, 0.3)),
+    uHairP: u(new THREE.Vector4(1 / Math.max(opts.texLuminance ?? 0.5, 0.01), 0.75, opts.rootAt === undefined ? 0 : 0.55, 0.3)),
     uHairShift: u(new THREE.Vector4(0.08, -0.12, 0.35, 0.25)),
     uHairSpec: u(new THREE.Vector4(110, 26, 0.16, 0.3)),
     uHairLit: u(new THREE.Vector4(0.45, 0.25, 0.7, 0)),
@@ -1660,13 +1778,15 @@ export interface BrowLashMaterialOptions {
   /** RGBA card texture (sRGB); alpha = coverage. Optional: without it the geometry is drawn solid. */
   map?: THREE.Texture | null;
   color?: THREE.ColorRepresentation;
+  /** mean linear luminance of the opaque texels (default 1: white, alpha-only cards such as brow_*.webp / lash_*.webp) */
+  texLuminance?: number;
   msaa?: boolean;
   alphaTest?: number;
 }
 
 export interface BrowLashMaterial {
   material: THREE.MeshStandardMaterial;
-  uniforms: { uCardColor: Uniform<THREE.Color>; /** x texture contrast, y alpha gain, z specular scale */ uCardP: Uniform<THREE.Vector3> };
+  uniforms: { uCardColor: Uniform<THREE.Color>; /** x texture contrast, y alpha gain, z specular scale, w 1 / texture luminance */ uCardP: Uniform<THREE.Vector4> };
   setColor(c: THREE.ColorRepresentation): void;
   dispose(): void;
 }
@@ -1676,7 +1796,7 @@ export function createBrowLashMaterial(opts: BrowLashMaterialOptions = {}): Brow
   const msaa = opts.msaa !== false;
   const uniforms = {
     uCardColor: u(srgb(opts.color ?? (lash ? '#0e0a08' : '#2b2119'))),
-    uCardP: u(new THREE.Vector3(lash ? 0.2 : 0.6, lash ? 1.25 : 1.1, lash ? 0.1 : 0.35)),
+    uCardP: u(new THREE.Vector4(lash ? 0.2 : 0.6, lash ? 1.25 : 1.1, lash ? 0.1 : 0.35, 1 / Math.max(opts.texLuminance ?? 1, 0.01))),
   };
   const mat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -1694,7 +1814,7 @@ export function createBrowLashMaterial(opts: BrowLashMaterialOptions = {}): Brow
   mat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, uniforms);
     let fs = sh.fragmentShader;
-    fs = beforeMain(fs, 'uniform vec3 uCardColor;\nuniform vec3 uCardP;');
+    fs = beforeMain(fs, 'uniform vec3 uCardColor;\nuniform vec4 uCardP;');
     fs = replaceChunk(
       fs,
       'map_fragment',
@@ -1703,7 +1823,7 @@ export function createBrowLashMaterial(opts: BrowLashMaterialOptions = {}): Brow
       {
         vec4 cx = texture2D(map, vMapUv);
         float lum = dot(cx.rgb, vec3(0.2126, 0.7152, 0.0722));
-        diffuseColor.rgb = uCardColor * mix(1.0, clamp(lum * 4.0, 0.3, 2.0), uCardP.x);
+        diffuseColor.rgb = uCardColor * mix(1.0, clamp(lum * uCardP.w, 0.3, 2.0), uCardP.x);
         diffuseColor.a *= clamp(cx.a * uCardP.y, 0.0, 1.0);
       }
       #else
@@ -1758,6 +1878,12 @@ export interface StudioEnvironmentOptions {
   intensity?: number;
   /** PMREM cube size (r187 minimum is 256) */
   size?: number;
+  /** per-panel radiance multipliers (look-dev) */
+  key?: number;
+  fill?: number;
+  rim?: number;
+  top?: number;
+  bounce?: number;
 }
 
 /**
@@ -1794,12 +1920,14 @@ export function createStudioEnvironment(renderer: THREE.WebGLRenderer, opts: Stu
   disposables.push(shellG, shellM);
 
   const L = STUDIO_LAYOUT;
-  panel(L.key.az, L.key.el, 6, 5.2, 5.2, '#fff3e6', 7.5); // key softbox (large → soft terminator in reflections)
-  panel(L.fill.az, L.fill.el, 6, 5.5, 6.5, '#dfe8ff', 0.85); // fill
-  panel(L.rimL.az, L.rimL.el, 6, 1.5, 6.5, '#d6e6ff', 14); // rim strips
-  panel(L.rimR.az, L.rimR.el, 6, 1.5, 6.5, '#fff0e0', 11);
-  panel(L.top.az, L.top.el, 6, 3.0, 3.0, '#ffffff', 3.2); // hair light
-  panel(8, -38, 6, 6.0, 2.6, '#ffe2c8', 0.5); // warm bounce from the floor in front (fills eye sockets, under the chin)
+  // Radiances are chosen so that the environment is the *fill* (its irradiance is ~1/4 of the shadow-mapped key light):
+  // an environment that carries the key itself lights everything without shadows and flattens the form.
+  panel(L.key.az, L.key.el, 6, 5.2, 5.2, '#fff3e6', 2.2 * (opts.key ?? 1)); // key softbox (large → soft highlight in reflections)
+  panel(L.fill.az, L.fill.el, 6, 5.5, 6.5, '#dfe8ff', 0.6 * (opts.fill ?? 1)); // fill
+  panel(L.rimL.az, L.rimL.el, 6, 1.5, 6.5, '#d6e6ff', 9 * (opts.rim ?? 1)); // rim strips
+  panel(L.rimR.az, L.rimR.el, 6, 1.5, 6.5, '#fff0e0', 7 * (opts.rim ?? 1));
+  panel(L.top.az, L.top.el, 6, 3.0, 3.0, '#ffffff', 2.2 * (opts.top ?? 1)); // hair light
+  panel(8, -38, 6, 6.0, 2.6, '#ffe2c8', 0.4 * (opts.bounce ?? 1)); // warm bounce from the floor in front (fills eye sockets, under the chin)
 
   const pmrem = new THREE.PMREMGenerator(renderer);
   const rt = pmrem.fromScene(scene, 0.02, 0.1, 50, { size: opts.size ?? 256 });
@@ -1864,9 +1992,11 @@ export function setupStudioLights(scene: THREE.Scene, opts: StudioLightOptions =
     key.castShadow = true;
     key.shadow.mapSize.set(tier.shadowMapSize, tier.shadowMapSize);
     key.shadow.radius = tier.shadowRadius;
-    // generous normal bias: keeps the wrapped (sub-surface) part of the terminator out of self-shadow
+    // normal bias keeps the wrapped (sub-surface) part of the terminator out of self-shadow
     key.shadow.bias = -0.0006;
-    key.shadow.normalBias = 0.02;
+    key.shadow.normalBias = 0.012;
+    // a large softbox never blocks completely over the short distances on a body
+    key.shadow.intensity = 0.85;
   }
   const dir = new THREE.Vector3();
   const place = (l: THREE.DirectionalLight, az: number, el: number, rigAz: number) => {

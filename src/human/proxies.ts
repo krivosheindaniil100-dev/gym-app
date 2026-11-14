@@ -16,8 +16,10 @@
  *      rotation rest → posed of the head (Kabsch fit over 48 skull vertices), blended per vertex with the rotation of
  *      the upper torso by the vertex's "headness" (hair lying on the shoulders follows the shoulders).
  *      Measured against MakeHuman's own route (fit in rest pose, then skin the proxy with its interpolated bone
- *      weights) for a 15° head tilt: ≤ 1.8 mm max / ≤ 0.2 mm mean. Offsets expressed in the local frame of each
- *      reference triangle were tried and rejected: 6–40 mm errors, even without a pose (morphs tilt the triangles).
+ *      weights) for 15° head tilt / nod / yaw: eyes, brows, lashes exact; hair ≤ 3.2 mm max / ≤ 0.19 mm mean.
+ *      Alternatives measured on the same poses: offsets in the local frame of each reference triangle 1.2–9.8 mm max
+ *      (6–40 mm when the frames are taken relative to the authoring mesh, even without a pose – morphs tilt the
+ *      triangles); offsets left axis aligned (plain MakeHuman formula on the posed mesh) up to 12.4 mm max / 3 mm mean.
  *
  * Skin collision (hair only): loose hair (long hair on the shoulders / back, fringes) is authored for one body. Each such
  *  vertex carries a collider – its nearest skin vertex j on the authoring human plus four ring neighbours – and its rest
@@ -70,6 +72,12 @@ export interface ProxyJson {
   textures?: Record<string, string>;
   tint: number[];
   tags?: string[];
+  /** builder diagnostics: share of render vertices with a known strand direction */
+  dirKnown?: number;
+  /** builder diagnostics: human the proxy was modelled on, residual of its stored vertices against the fit (dm) */
+  authoring?: { human: string; residual: number | null; residualMedian?: number; residualMax?: number; outliers?: number };
+  /** test reference: plain MakeHuman fit (no collision) on the raw base mesh – centroid / bounds of the fit vertices */
+  check?: { centroid: number[]; min: number[]; max: number[] };
 }
 
 export interface ProxiesJson {

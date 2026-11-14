@@ -267,13 +267,24 @@ async function body(browser) {
   });
   await step('аватар: внешность', async () => {
     await page.locator('.sheet .seg button', { hasText: 'Внешность' }).click();
-    const sw = page.locator('.sheet button[aria-label^="#"]');
+    const sw = page.locator('.sheet button[aria-label^="#"]'); // 6 skin tones, then 6 hair colours
+    expect((await sw.count()) === 12, 'skin + hair swatches');
     await sw.nth(1).click();
-    await sw.nth(8).click();
-    await sw.nth(14).click();
-    for (const n of ['Под машинку', 'Без волос', 'Короткие', 'Азиат.', 'Африк.', 'Смешан.', 'Европ.']) await page.locator('.sheet .seg button', { hasText: n }).click();
+    await sw.nth(9).click();
+    for (const n of ['Карие', 'Светло-карие', 'Зелёные', 'Серые', 'Голубые']) await page.locator(`.sheet button[aria-label="${n}"]`).click();
+    for (const n of ['Короткие', 'Без волос', 'Хвост', 'Длинные', 'Каре', 'Под машинку']) {
+      await page.locator('.sheet .chip', { hasText: n }).click();
+      await page.waitForTimeout(250);
+    }
+    for (const n of ['Густые', 'Тонкие', 'Авто', 'Азиат.', 'Африк.', 'Смешан.', 'Европ.']) await page.locator('.sheet .seg button', { hasText: n }).click();
+    const av = (await state()).profile.avatar;
+    expect(av.eyeColor === 'blue' && av.hairStyle === 'buzz' && !av.brows && av.ethnic.caucasian > 0.8, 'appearance stored');
+    expect(av.skinTone === '#dcae93' && av.hairColor === '#7a5434', 'tones stored');
+    await page.locator('.sheet .chip', { hasText: 'Короткие' }).click();
     await closeSheet();
-    await page.waitForTimeout(1200);
+    await waitModel();
+    await page.waitForTimeout(1500);
+    await shot('body-appearance');
   });
   await step('аватар: листы «По фото» и «Лицо по селфи» открываются', async () => {
     await page.getByRole('button', { name: 'Мой аватар' }).click();

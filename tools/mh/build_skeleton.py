@@ -559,12 +559,12 @@ def build(args):
         s = (V - a) @ d / ln
         sel = np.where(is_body & bones[dom] & (s > lo) & (s < hi))[0]
         assert len(sel) >= 8, (name, len(sel))
-        sel = stride(sel, 40)
+        sel = stride(sel, 160)
         caps.append(dict(name=name, type='limb', a=jindex[ja], b=jindex[jb], k=k))
         capverts.extend(sel.tolist()); capoff.append(len(capverts))
 
     def box(name, axis, sel, k=1.0):
-        sel = stride(sel, 64)
+        sel = stride(sel, 600)
         caps.append(dict(name=name, type='box', axis=axis, bone=0, k=k))
         capverts.extend(sel.tolist()); capoff.append(len(capverts))
 

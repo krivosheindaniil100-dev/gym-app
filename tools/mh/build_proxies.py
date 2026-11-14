@@ -14,6 +14,18 @@ Output (deterministic):
   public/human/proxies.json   layout, per-proxy metadata, render hints
   public/human/tex/*.webp     hair cards (grey + alpha, tint at runtime), brows/lashes (white + alpha), irises (RGB)
 
+proxies.bin arrays per proxy (byte offsets in proxies.json, every array 4-byte aligned):
+  ref  u16 x 3 x fitCount   base vertex indices of the reference triangle
+  wgt  i16 x 2 x fitCount   barycentric w1, w2 / 4096 (w0 = 1 - w1 - w2)
+  off  i16 x 3 x fitCount   offset / 20000 dm
+  hw   u8  x fitCount       "headness" (255 = follows the head bone, 0 = follows the upper torso) for posed fitting
+  dup  u16 x (vertexCount - fitCount)   canonical fit vertex of each uv-seam duplicate (render vertices = fit + dups)
+  uv   u16 x 2 x vertexCount   uv / 65535 (v up)
+  idx  u16 x 3 x triCount   triangles over the render vertices
+  dir  i8  x 2 x vertexCount  (hair) strand direction in uv space from the structure tensor of the hair texture
+  col  {n, idx u16 x n, ref u16 x 5 x n, clr u8 x n}  (hair) skin colliders of loose hair: fit vertex, skin vertex j and
+       four ring neighbours a, b, c, d (normal = (a - c) x (b - d)), rest clearance / 500 dm on the authoring human
+
 Fitting (MakeHuman shared/proxy.py, Proxy.getCoords):
   p = w0*V[r0] + w1*V[r1] + w2*V[r2] + M * offset,   M = diag(|V[a_n]-V[b_n]|_n / den_n), n = x, y, z
 The JSON export dropped the x_scale / y_scale / z_scale lines of the .mhclo files (TMatrix), so they are re-derived:
@@ -37,7 +49,7 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 SCRATCH = '/tmp/claude-0/-home-user-gym-app/7c91fb80-ada3-505f-ab80-0fc6e00e761f/scratchpad'
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -71,6 +83,7 @@ FINAL = [
 ]
 CANDIDATES = FINAL + [
     dict(name='eyes_low', kind='eyes', src='eyes/Low-Poly', label='Eyes (low poly)'),
+    dict(name='afro01', kind='hair', src='hair/afro01', label='Afro'),  # rejected: cards and white patches show
     *[dict(name='eyebrow%03d' % i, kind='eyebrows', src='eyebrows/eyebrow%03d' % i, label='Brows %d' % i) for i in range(1, 13) if i not in (1, 10)],
     dict(name='eyelashes01', kind='eyelashes', src='eyelashes/Eyelashes01', label='Lashes 1'),
     dict(name='eyelashes03', kind='eyelashes', src='eyelashes/eyelashes03', label='Lashes 3'),
@@ -374,9 +387,17 @@ def hair_texture(src, dst, size, quality):
     g8 = linear_to_srgb(dilate_fill(grey, alpha > 0.02))
     out = np.zeros((size, size, 4), dtype=np.uint8)
     out[:, :, 0] = out[:, :, 1] = out[:, :, 2] = np.clip(np.round(g8), 0, 255).astype(np.uint8)
-    out[:, :, 3] = a[:, :, 3].astype(np.uint8)
+    out[:, :, 3] = feather_alpha(a[:, :, 3], size)
     n = save_webp(Image.fromarray(out, 'RGBA'), dst, quality, alpha_quality=90)
     return n, tint, float(wsum / alpha.size), strand_tensor(g8 / 255.0, alpha)
+
+
+def feather_alpha(alpha8, size):
+    """Soft card edges: the viewer breaks the 0.5 contour into strands and blends the feather in a second pass."""
+    # dilate first, then blur: solid texels stay solid (cards that meet at a parting keep meeting), the feather grows outwards
+    im = Image.fromarray(np.asarray(alpha8).astype(np.uint8), 'L')
+    k = max(1, round(size / 512 * 3))
+    return np.asarray(im.filter(ImageFilter.MaxFilter(2 * k + 1)).filter(ImageFilter.GaussianBlur(radius=k)))
 
 
 def box_blur(a, r, passes=3):
@@ -619,6 +640,10 @@ def main():
             scale=[[int(a), int(b), float(round(d, 5))] for (a, b, _), d in zip(HEAD_REFS, den)],
             render=RENDER[kind],
         )
+        # reference for tests: plain MakeHuman fit (float64, no collision) on the raw base mesh
+        pr = p_rest[used]
+        entry['check'] = dict(centroid=[round(float(x), 5) for x in pr.mean(0)], min=[round(float(x), 5) for x in pr.min(0)],
+                              max=[round(float(x), 5) for x in pr.max(0)])
         if orient is not None:
             dirs, known = strand_dirs(orient, uvs, tris)
             entry['dir'] = blob.add(dirs)
@@ -654,7 +679,10 @@ def main():
             den, auth = np.array(EYES_LOWPOLY_DEN), dict(human='legacy (mhclo values)', residual=None)
         else:
             den = head_extents(humans[res[0][2]])
-            auth = dict(human=res[0][2], residual=round(res[0][0], 5), residualMax=round(res[0][1], 4))
+            # residual of the stored OBJ vertices against the fit on the authoring human (euclidean, dm)
+            eb = np.linalg.norm(d['objv'] - off - (humans[res[0][2]][ref] * w[:, :, None]).sum(1), axis=1)
+            auth = dict(human=res[0][2], residual=round(res[0][0], 5), residualMedian=round(float(np.median(eb)), 5),
+                        residualMax=round(float(eb.max()), 4), outliers=int((eb > 0.02).sum()))
         # rest shape on the base mesh (MakeHuman fit) – used for diagonal choice / statistics only
         m_base = head_extents(base) / den
         p_rest = (base[ref] * w[:, :, None]).sum(1) + off * m_base

@@ -10,3 +10,4 @@ android/local.properties
 android/capacitor-cordova-android-plugins/build
 test-results
 public/mediapipe
+__pycache__/
