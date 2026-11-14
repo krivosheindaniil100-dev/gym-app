@@ -52,6 +52,9 @@ EYES_LOWPOLY_DEN = (1.7412, 2.7409, 2.2613)
 
 W_SCALE = 4096  # barycentric weights w1, w2 as int16 / 4096 (w0 = 1 - w1 - w2)
 OFF_SCALE = 20000  # offsets as int16 / 20000 decimetre (5 micrometre steps)
+CLR_SCALE = 500  # collider rest clearance as uint8 / 500 decimetre (0.2 mm steps, max 5.1 cm)
+COL_MARGIN, COL_SLOPE = 0.04, 0.25  # kept clearance = min(rest, COL_MARGIN + COL_SLOPE * rest)  [dm]
+COL_MAX_DIST = 2.0  # hair further than 20 cm from the skin of the authoring human gets no collider
 
 # ───────────────────────── asset selection ─────────────────────────
 # name, kind, source folder, label, tags.  Only official MakeHuman system assets.
@@ -65,7 +68,6 @@ FINAL = [
     dict(name='ponytail01', kind='hair', src='hair/ponytail01', label='Ponytail'),
     dict(name='long01', kind='hair', src='hair/long01', label='Long'),
     dict(name='bob01', kind='hair', src='hair/bob01', label='Bob'),
-    dict(name='afro01', kind='hair', src='hair/afro01', label='Afro'),
 ]
 CANDIDATES = FINAL + [
     dict(name='eyes_low', kind='eyes', src='eyes/Low-Poly', label='Eyes (low poly)'),
@@ -83,7 +85,7 @@ EYE_COLORS = ['brown', 'brownlight', 'blue', 'green', 'grey']
 # three.js material recommendations per kind (documented in proxies.json so the viewer needs no magic numbers)
 RENDER = {
     'hair': dict(
-        side='double', transparent=False, alphaTest=0.5, alphaToCoverage=True, depthWrite=True, renderOrder=2,
+        side='double', transparent=False, alphaTest=0.5, alphaToCoverage=True, depthWrite=True, renderOrder=2, roughness=0.85,
         note='MSAA: alphaToCoverage + alphaTest 0.5. No MSAA: pass 1 opaque alphaTest 0.5 depthWrite; optional pass 2 '
              'transparent, depthWrite false, depthFunc LESS for soft strand tips. Multiply map by tint.'),
     'eyebrows': dict(
@@ -112,6 +114,74 @@ def load_obj_verts(path):
     a = np.asarray(v, dtype=np.float64)
     assert a.shape == (N_BASE, 3), a.shape
     return a
+
+
+def load_obj_skin_faces(path):
+    """Faces of the base OBJ that only use skin vertices (index < BODY_VERTS)."""
+    faces = []
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            if line.startswith('f '):
+                ids = [int(t.split('/')[0]) - 1 for t in line.split()[1:]]
+                if max(ids) < BODY_VERTS:
+                    faces.append(ids)
+    return faces
+
+
+def skin_rings(faces, v):
+    """Per skin vertex j four one-ring neighbours (a, b, c, d) with cross(V[a]-V[c], V[b]-V[d]) = outward normal
+    (central differences across the ring: cheap to evaluate at runtime on the morphed / posed mesh).
+    Returns (rings (BODY_VERTS, 4), valid mask)."""
+    nxt = [dict() for _ in range(BODY_VERTS)]
+    nrm = np.zeros((BODY_VERTS, 3))
+    for f in faces:
+        n = len(f)
+        fn = np.cross(v[f[2]] - v[f[0]], v[f[3 % n]] - v[f[1]]) if n == 4 else np.cross(v[f[1]] - v[f[0]], v[f[2]] - v[f[0]])
+        for k in range(n):
+            nxt[f[k]][f[(k - 1) % n]] = f[(k + 1) % n]
+            nrm[f[k]] += fn
+    rings = np.zeros((BODY_VERTS, 4), dtype=np.int64)
+    ok = np.zeros(BODY_VERTS, dtype=bool)
+    for j in range(BODY_VERTS):
+        m = nxt[j]
+        if len(m) < 3:
+            continue
+        start = next(iter(m))
+        ring, cur = [start], m.get(start)
+        while cur is not None and cur != start and len(ring) <= len(m):
+            ring.append(cur)
+            cur = m.get(cur)
+        if cur != start:
+            continue  # open fan (mesh border)
+        n = len(ring)
+        r = [ring[0], ring[1], ring[2], ring[0]] if n == 3 else [ring[0], ring[n // 4], ring[n // 2], ring[(3 * n) // 4]]
+        if np.dot(np.cross(v[r[0]] - v[r[2]], v[r[1]] - v[r[3]]), nrm[j]) < 0:
+            r = [r[0], r[3], r[2], r[1]]
+        rings[j] = r
+        ok[j] = True
+    return rings, ok
+
+
+def hair_colliders(p, cand, skin, rings, ring_ok):
+    """Skin colliders for loose hair. p: hair vertices on the authoring human (collision free by design), cand: mask of
+    vertices that may collide. For each one the nearest skin vertex j and its ring give a tangent plane; the signed
+    rest clearance above that plane is stored. Returns (hair vertex index, [j, a, b, c, d], clearance in dm)."""
+    sel = np.where(ring_ok & (skin[:BODY_VERTS, 1] > p[:, 1].min() - 1.0))[0]
+    S = skin[sel]
+    ids = np.where(cand)[0]
+    jj = np.zeros(len(ids), dtype=np.int64)
+    dd = np.zeros(len(ids))
+    for i in range(0, len(ids), 256):
+        d = np.linalg.norm(p[ids[i:i + 256], None, :] - S[None], axis=2)
+        k = d.argmin(1)
+        jj[i:i + 256] = sel[k]
+        dd[i:i + 256] = d[np.arange(len(k)), k]
+    r = rings[jj]
+    n = np.cross(skin[r[:, 0]] - skin[r[:, 2]], skin[r[:, 1]] - skin[r[:, 3]])
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+    c = ((p[ids] - skin[jj]) * n).sum(1)
+    keep = (dd <= COL_MAX_DIST) & (c >= 0)
+    return ids[keep], np.concatenate([jj[keep, None], r[keep]], axis=1), c[keep]
 
 
 def parse_faces(faces, n_uv_layers):
@@ -306,7 +376,48 @@ def hair_texture(src, dst, size, quality):
     out[:, :, 0] = out[:, :, 1] = out[:, :, 2] = np.clip(np.round(g8), 0, 255).astype(np.uint8)
     out[:, :, 3] = a[:, :, 3].astype(np.uint8)
     n = save_webp(Image.fromarray(out, 'RGBA'), dst, quality, alpha_quality=90)
-    return n, tint, float(wsum / alpha.size)
+    return n, tint, float(wsum / alpha.size), strand_tensor(g8 / 255.0, alpha)
+
+
+def box_blur(a, r, passes=3):
+    """Separable box blur (three passes ~ Gaussian), edge clamped."""
+    n = 2 * r + 1
+    for _ in range(passes):
+        for ax in (0, 1):
+            pad = [(r + 1, r) if i == ax else (0, 0) for i in range(2)]
+            c = np.cumsum(np.pad(a, pad, mode='edge'), axis=ax)
+            m = a.shape[ax]
+            a = (np.take(c, np.arange(n, n + m), axis=ax) - np.take(c, np.arange(0, m), axis=ax)) / n
+    return a
+
+
+def strand_tensor(grey, alpha, radius=5):
+    """Smoothed structure tensor (Jxx, Jxy, Jyy; image space, y down) of the painted strands. Strands run along the
+    eigenvector of the SMALLER eigenvalue (brightness changes across strands, not along them)."""
+    gy, gx = np.gradient(grey)
+    return np.stack([box_blur(alpha * gx * gx, radius), box_blur(alpha * gx * gy, radius), box_blur(alpha * gy * gy, radius)], axis=-1)
+
+
+def strand_dirs(tensor, uvs, tris):
+    """Strand direction in uv space (v up) per render vertex as int8 (unit length = 127, sign arbitrary; 0,0 = unknown).
+    The tensor is sampled at the vertex and at the centroids of its triangles (keeps samples inside the uv island)."""
+    size = tensor.shape[0]
+
+    def sample(uv):
+        x = np.clip(np.floor(uv[:, 0] * size).astype(np.int64), 0, size - 1)
+        y = np.clip(np.floor((1 - uv[:, 1]) * size).astype(np.int64), 0, size - 1)
+        return tensor[y, x]
+
+    acc = sample(uvs)
+    cen = sample(uvs[tris].mean(1))
+    for k in range(3):
+        np.add.at(acc, tris[:, k], 2 * cen)
+    jxx, jxy, jyy = acc[:, 0], acc[:, 1], acc[:, 2]
+    phi = 0.5 * np.arctan2(2 * jxy, jxx - jyy) + np.pi / 2  # strand angle in the image
+    coherence = np.hypot(jxx - jyy, 2 * jxy) / np.maximum(jxx + jyy, 1e-12)
+    d = np.stack([np.cos(phi), -np.sin(phi)], axis=1)  # image y down → v up
+    d[(coherence < 0.15) | (jxx + jyy < 1e-9)] = 0
+    return np.round(d * 127).astype(np.int8), float((coherence >= 0.15).mean())
 
 
 def stroke_texture(src, dst, size, alpha_quality=90):
@@ -455,6 +566,7 @@ def main():
     parents = {b: d['parent'] for b, d in rig['bones'].items()}
     headness, w_head, w_torso = load_weights(args.weights, parents)
 
+    rings, ring_ok = skin_rings(load_obj_skin_faces(args.base_obj), base)
     body = np.arange(N_BASE) < BODY_VERTS
     head_anchor = pick_anchor(base, body & (w_head > 0.999), 48)
     torso_anchor = pick_anchor(base, body & (w_torso > 0.9), 48)
@@ -469,7 +581,7 @@ def main():
     tex_bytes = {}
     report = []
 
-    def emit(name, kind, label, src, p_rest, ref, w, off, faces, uv_fn, den, hw, extra):
+    def emit(name, kind, label, src, p_rest, ref, w, off, faces, uv_fn, den, hw, extra, orient=None, collide=None):
         used, dup, uvs, tris = build_mesh(p_rest, faces, uv_fn)
         n_fit, n_render = len(used), len(used) + len(dup)
         assert n_render < 65536
@@ -497,6 +609,19 @@ def main():
             scale=[[int(a), int(b), float(round(d, 5))] for (a, b, _), d in zip(HEAD_REFS, den)],
             render=RENDER[kind],
         )
+        if orient is not None:
+            dirs, known = strand_dirs(orient, uvs, tris)
+            entry['dir'] = blob.add(dirs)
+            entry['dirKnown'] = round(known, 3)
+        if collide is not None:
+            p_auth, cand, skin = collide
+            ci, cref, cclr = hair_colliders(p_auth[used], cand[used], skin, rings, ring_ok)
+            if len(ci):
+                entry['col'] = dict(
+                    n=int(len(ci)),
+                    idx=blob.add(ci.astype('<u2')),
+                    ref=blob.add(cref.astype('<u2')),
+                    clr=blob.add(np.clip(np.round(cclr * CLR_SCALE), 0, 255).astype('u1')))
         entry.update(extra)
         proxies.append(entry)
         return entry, qerr
@@ -597,9 +722,14 @@ def main():
             return (float(t[0]), float(t[1]))
 
         src_tex = sorted((folder / 'textures').glob('*.png'))[0]
+        orient = collide = None
         if kind == 'hair':
             dst = tex_dir / ('hair_%s.webp' % name)
-            n, tint, cov = hair_texture(src_tex, dst, 512, 82)
+            n, tint, cov, orient = hair_texture(src_tex, dst, 512, 82)
+            # loose hair (not glued to the scalp) collides with the skin: colliders from the authoring human (M = I)
+            auth_v = humans[res[0][2]]
+            loose = (hw < 0.999) | (ref >= BODY_VERTS).any(1) | (np.linalg.norm(off, axis=1) > 0.1)
+            collide = ((auth_v[ref] * w[:, :, None]).sum(1) + off, loose, auth_v)
         elif kind == 'eyebrows':
             dst = tex_dir / ('brow_%s.webp' % name[-3:])
             n, tint, cov = stroke_texture(src_tex, dst, 512)
@@ -608,7 +738,8 @@ def main():
             n, tint, cov = stroke_texture(src_tex, dst, 512)
         tex_bytes[dst.name] = n
         e, qerr = emit(name, kind, a['label'], a['src'], p_rest, ref, w, off, faces, uv_fn, den, hw,
-                       dict(texture='tex/' + dst.name, tint=[round(float(x), 4) for x in tint], tags=d['tags'], authoring=auth))
+                       dict(texture='tex/' + dst.name, tint=[round(float(x), 4) for x in tint], tags=d['tags'], authoring=auth),
+                       orient=orient, collide=collide)
         report.append((name, e, qerr, auth, n_delete))
 
     data = blob.b.getvalue()
@@ -620,6 +751,8 @@ def main():
         baseVertexCount=N_BASE,
         weightScale=W_SCALE,
         offsetScale=OFF_SCALE,
+        clearanceScale=CLR_SCALE,
+        collision=dict(margin=COL_MARGIN, slope=COL_SLOPE),
         # rigid frames estimated from the posed base mesh (see src/human/proxies.ts)
         anchors=dict(head=head_anchor, torso=torso_anchor),
         # body faces to hide under a proxy: none of the shipped proxies sets MakeHuman's delete_verts

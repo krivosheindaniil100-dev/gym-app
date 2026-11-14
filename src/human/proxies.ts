@@ -18,6 +18,12 @@
  *      Measured against MakeHuman's own route (fit in rest pose, then skin the proxy with its interpolated bone
  *      weights) for a 15° head tilt: ≤ 1.8 mm max / ≤ 0.2 mm mean. Offsets expressed in the local frame of each
  *      reference triangle were tried and rejected: 6–40 mm errors, even without a pose (morphs tilt the triangles).
+ *
+ * Skin collision (hair only): loose hair (long hair on the shoulders / back, fringes) is authored for one body. Each such
+ *  vertex carries a collider – its nearest skin vertex j on the authoring human plus four ring neighbours – and its rest
+ *  clearance above that tangent plane. After fitting, a vertex that is closer to the plane than
+ *  min(rest, margin + slope · rest) is pushed out along the plane normal, evaluated on the CURRENT (morphed, posed)
+ *  base mesh. This keeps heavy shoulders / backs from poking through long hair. Disable with opts.collide = false.
  */
 
 export type ProxyKind = 'hair' | 'eyebrows' | 'eyelashes' | 'eyes' | 'cornea';
@@ -54,9 +60,10 @@ export interface ProxyJson {
   dup: number;
   uv: number;
   idx: number;
-  /** optional per-vertex extras (hair only) */
-  ao?: number;
+  /** hair only: byte offset of the per-render-vertex strand direction in uv space (int8 × 2) */
   dir?: number;
+  /** hair only: skin colliders – n entries: idx (u16 fit vertex), ref (u16 × 5: j, a, b, c, d), clr (u8 rest clearance) */
+  col?: { n: number; idx: number; ref: number; clr: number };
   scale: [number, number, number][];
   render: ProxyRenderHints;
   texture: string | null;
@@ -71,6 +78,8 @@ export interface ProxiesJson {
   baseVertexCount: number;
   weightScale: number;
   offsetScale: number;
+  clearanceScale?: number;
+  collision?: { margin: number; slope: number };
   anchors: { head: number[]; torso: number[] };
   deleteVerts: number[];
   proxies: ProxyJson[];
@@ -81,6 +90,10 @@ export interface ProxyShared {
   baseVertexCount: number;
   weightScale: number;
   offsetScale: number;
+  /** collider rest clearance = u8 / clearanceScale (dm); kept clearance = min(rest, colMargin + colSlope · rest) */
+  clearanceScale: number;
+  colMargin: number;
+  colSlope: number;
   headAnchor: Uint16Array;
   torsoAnchor: Uint16Array;
   /** base vertices whose faces must be hidden under a proxy (MakeHuman delete_verts) – empty for the shipped set */
@@ -106,9 +119,7 @@ export interface Proxy {
   /** recommended material colour, LINEAR rgb, multiplied with the (grey / white) texture */
   tint: [number, number, number];
   render: ProxyRenderHints;
-  /** hair only: baked ambient occlusion per render vertex (0 dark … 1 open), else null */
-  ao: Uint8Array | null;
-  /** hair only: strand direction in uv space per render vertex (int8, unit ≈ 127), else null */
+  /** hair only: strand direction in uv space (v up) per render vertex (int8, unit ≈ 127, sign arbitrary, 0,0 = unknown), else null */
   dir: Int8Array | null;
   // ── fitting data (views into proxies.bin) ──
   ref: Uint16Array; // fitCount × 3 base vertex indices
@@ -116,6 +127,9 @@ export interface Proxy {
   off: Int16Array; // fitCount × 3 offsets, scale 1 / offsetScale (dm)
   hw: Uint8Array; // fitCount: how much the vertex follows the head when posed (255 = head, 0 = torso)
   dup: Uint16Array; // (vertexCount − fitCount): canonical vertex of each duplicate
+  colIdx: Uint16Array | null; // colliders: fit vertex index
+  colRef: Uint16Array | null; // × 5 base vertices: j (plane point), a, b, c, d (normal = (a − c) × (b − d), outward)
+  colClr: Uint8Array | null; // rest clearance above the plane, scale 1 / clearanceScale (dm)
   scaleRef: Uint16Array; // 6: vertex pairs for x, y, z
   scaleDen: Float32Array; // 3
   shared: ProxyShared;
@@ -127,6 +141,8 @@ export interface FitOptions {
   /** Output transform p·scale + offset (e.g. FitResult.scale / .offset → metres, feet on y = 0). Default 1 / none. */
   scale?: number;
   offset?: ArrayLike<number>;
+  /** Push loose hair out of the skin (default true; only proxies with colliders are affected). */
+  collide?: boolean;
 }
 
 /** Parses proxies.json + proxies.bin. Typed arrays are views into `buf` (keep it alive, do not transfer it). */
@@ -135,6 +151,9 @@ export function loadProxies(json: ProxiesJson, buf: ArrayBuffer): Proxy[] {
     baseVertexCount: json.baseVertexCount,
     weightScale: json.weightScale,
     offsetScale: json.offsetScale,
+    clearanceScale: json.clearanceScale ?? 500,
+    colMargin: json.collision?.margin ?? 0.04,
+    colSlope: json.collision?.slope ?? 0.25,
     headAnchor: Uint16Array.from(json.anchors.head),
     torsoAnchor: Uint16Array.from(json.anchors.torso),
     deleteVerts: Uint16Array.from(json.deleteVerts ?? []),
@@ -164,13 +183,15 @@ export function loadProxies(json: ProxiesJson, buf: ArrayBuffer): Proxy[] {
       textures: p.textures ?? {},
       tint: [p.tint[0], p.tint[1], p.tint[2]],
       render: p.render,
-      ao: p.ao !== undefined ? new Uint8Array(buf, p.ao, p.vertexCount) : null,
       dir: p.dir !== undefined ? new Int8Array(buf, p.dir, p.vertexCount * 2) : null,
       ref: new Uint16Array(buf, p.ref, p.fitCount * 3),
       wgt: new Int16Array(buf, p.wgt, p.fitCount * 2),
       off: new Int16Array(buf, p.off, p.fitCount * 3),
       hw: new Uint8Array(buf, p.hw, p.fitCount),
       dup: new Uint16Array(buf, p.dup, nDup),
+      colIdx: p.col ? new Uint16Array(buf, p.col.idx, p.col.n) : null,
+      colRef: p.col ? new Uint16Array(buf, p.col.ref, p.col.n * 5) : null,
+      colClr: p.col ? new Uint8Array(buf, p.col.clr, p.col.n) : null,
       scaleRef,
       scaleDen,
       shared,
@@ -190,6 +211,8 @@ const M = new Float64Array(9); // scratch 3×3 (row-major)
 const N = new Float64Array(9);
 const QH = new Float64Array(4);
 const QT = new Float64Array(4);
+/** largest collision correction (dm) */
+const MAX_PUSH = 1.0;
 
 /**
  * Rotation (unit quaternion x, y, z, w) that best maps the anchor vertices of `rest` onto `posed` in the least squares
@@ -274,6 +297,7 @@ export function anchorRotation(anchor: Uint16Array, rest: Float32Array, posed: F
  */
 export function fitProxy(proxy: Proxy, base: Float32Array, out?: Float32Array, opts?: FitOptions): Float32Array {
   const { ref, wgt, off, hw, dup, scaleRef, scaleDen, fitCount, vertexCount, shared } = proxy;
+  if (base.length < shared.baseVertexCount * 3) throw new Error('fitProxy: base must hold all base vertices (helpers included)');
   const pos = out ?? new Float32Array(vertexCount * 3);
   const rest = opts?.rest;
   const src = rest ?? base;
@@ -319,9 +343,40 @@ export function fitProxy(proxy: Proxy, base: Float32Array, out?: Float32Array, o
       oy += qw * t1 + (qz * t0 - qx * t2);
       oz += qw * t2 + (qx * t1 - qy * t0);
     }
-    pos[i3] = (ax + w1 * (base[b] - ax) + w2 * (base[c] - ax) + ox) * s + tx;
-    pos[i3 + 1] = (ay + w1 * (base[b + 1] - ay) + w2 * (base[c + 1] - ay) + oy) * s + ty;
-    pos[i3 + 2] = (az + w1 * (base[b + 2] - az) + w2 * (base[c + 2] - az) + oz) * s + tz;
+    pos[i3] = ax + w1 * (base[b] - ax) + w2 * (base[c] - ax) + ox;
+    pos[i3 + 1] = ay + w1 * (base[b + 1] - ay) + w2 * (base[c + 1] - ay) + oy;
+    pos[i3 + 2] = az + w1 * (base[b + 2] - az) + w2 * (base[c + 2] - az) + oz;
+  }
+  // skin collision of loose hair against the tangent planes of its colliders (current base mesh, decimetres)
+  const { colIdx, colRef, colClr } = proxy;
+  if (colIdx && colRef && colClr && opts?.collide !== false) {
+    const kc = 1 / shared.clearanceScale, m0 = shared.colMargin, sl = shared.colSlope;
+    for (let k = 0, k5 = 0; k < colIdx.length; k++, k5 += 5) {
+      const j = colRef[k5] * 3, a = colRef[k5 + 1] * 3, b = colRef[k5 + 2] * 3, c = colRef[k5 + 3] * 3, d = colRef[k5 + 4] * 3;
+      const ux = base[a] - base[c], uy = base[a + 1] - base[c + 1], uz = base[a + 2] - base[c + 2];
+      const vx = base[b] - base[d], vy = base[b + 1] - base[d + 1], vz = base[b + 2] - base[d + 2];
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (l < 1e-12) continue;
+      nx /= l; ny /= l; nz /= l;
+      const i3 = colIdx[k] * 3;
+      const sd = (pos[i3] - base[j]) * nx + (pos[i3 + 1] - base[j + 1]) * ny + (pos[i3 + 2] - base[j + 2]) * nz;
+      let keep = colClr[k] * kc;
+      const lim = m0 + sl * keep;
+      if (lim < keep) keep = lim;
+      if (sd < keep) {
+        let push = keep - sd;
+        if (push > MAX_PUSH) push = MAX_PUSH; // far behind the plane: the plane no longer describes the skin there
+        pos[i3] += nx * push; pos[i3 + 1] += ny * push; pos[i3 + 2] += nz * push;
+      }
+    }
+  }
+  if (s !== 1 || tx !== 0 || ty !== 0 || tz !== 0) {
+    for (let i3 = 0; i3 < fitCount * 3; i3 += 3) {
+      pos[i3] = pos[i3] * s + tx;
+      pos[i3 + 1] = pos[i3 + 1] * s + ty;
+      pos[i3 + 2] = pos[i3 + 2] * s + tz;
+    }
   }
   // uv-seam duplicates share the position of their canonical vertex
   for (let k = 0, j = fitCount * 3; k < dup.length; k++, j += 3) {
