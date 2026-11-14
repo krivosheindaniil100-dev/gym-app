@@ -4,21 +4,23 @@ export interface ActivityType {
   name: string;
   met: number;
   group: 'cardio' | 'sport' | 'strength' | 'daily';
+  /** produces steps (counted by a pedometer) */
+  steps?: boolean;
 }
 
 export const ACTIVITIES: ActivityType[] = [
-  { id: 'walk_4', name: 'Ходьба спокойная (4 км/ч)', met: 3.0, group: 'cardio' },
-  { id: 'walk_5', name: 'Ходьба (5 км/ч)', met: 3.5, group: 'cardio' },
-  { id: 'walk_6', name: 'Быстрая ходьба (6 км/ч)', met: 4.3, group: 'cardio' },
-  { id: 'walk_incline', name: 'Ходьба в горку / беговая дорожка с наклоном', met: 6.0, group: 'cardio' },
-  { id: 'run_8', name: 'Бег (8 км/ч)', met: 8.3, group: 'cardio' },
-  { id: 'run_10', name: 'Бег (10 км/ч)', met: 9.8, group: 'cardio' },
-  { id: 'run_12', name: 'Бег (12 км/ч)', met: 11.0, group: 'cardio' },
+  { id: 'walk_4', name: 'Ходьба спокойная (4 км/ч)', met: 3.0, group: 'cardio', steps: true },
+  { id: 'walk_5', name: 'Ходьба (5 км/ч)', met: 3.5, group: 'cardio', steps: true },
+  { id: 'walk_6', name: 'Быстрая ходьба (6 км/ч)', met: 4.3, group: 'cardio', steps: true },
+  { id: 'walk_incline', name: 'Ходьба в горку / беговая дорожка с наклоном', met: 6.0, group: 'cardio', steps: true },
+  { id: 'run_8', name: 'Бег (8 км/ч)', met: 8.3, group: 'cardio', steps: true },
+  { id: 'run_10', name: 'Бег (10 км/ч)', met: 9.8, group: 'cardio', steps: true },
+  { id: 'run_12', name: 'Бег (12 км/ч)', met: 11.0, group: 'cardio', steps: true },
   { id: 'bike_mod', name: 'Велосипед / велотренажёр умеренно', met: 6.8, group: 'cardio' },
   { id: 'bike_hard', name: 'Велосипед интенсивно', met: 8.8, group: 'cardio' },
   { id: 'elliptical', name: 'Эллипс', met: 5.0, group: 'cardio' },
   { id: 'rower', name: 'Гребной тренажёр', met: 7.0, group: 'cardio' },
-  { id: 'stairs', name: 'Степпер / подъём по лестнице', met: 8.8, group: 'cardio' },
+  { id: 'stairs', name: 'Степпер / подъём по лестнице', met: 8.8, group: 'cardio', steps: true },
   { id: 'swim_mod', name: 'Плавание умеренно', met: 5.8, group: 'cardio' },
   { id: 'swim_hard', name: 'Плавание интенсивно', met: 9.8, group: 'cardio' },
   { id: 'rope', name: 'Скакалка', met: 11.8, group: 'cardio' },

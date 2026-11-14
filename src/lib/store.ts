@@ -27,6 +27,15 @@ const prefStorage: StateStorage = {
 
 export { DEFAULT_PROFILE };
 
+const finite = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+/** Drop corrupted measurements (NaN persisted as null, impossible values) and future dates. */
+export function saneMeasurements(ms: Measurement[] | undefined): Measurement[] {
+  return (ms ?? [])
+    .filter((m) => m && finite(m.weight) && finite(m.fatKg) && finite(m.ffm) && finite(m.fatPct) && m.weight > 20 && m.ffm > 10 && m.fatKg >= 0 && !Number.isNaN(new Date(m.date).getTime()))
+    .map((m) => (new Date(m.date).getTime() > Date.now() + 5 * 60000 ? { ...m, date: new Date().toISOString() } : m))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
 export interface AppState {
   hydrated: boolean;
   onboarded: boolean;
@@ -35,7 +44,7 @@ export interface AppState {
   food: Record<string, FoodEntry[]>;
   activity: Record<string, DayActivity>;
   customFoods: Food[];
-  recentFoods: { id: string; name: string; brand?: string; per100: Food['per100']; units?: Food['units']; lastGrams: number; source: Food['source'] }[];
+  recentFoods: { id: string; name: string; brand?: string; per100: Food['per100']; units?: Food['units']; lastGrams: number; source: Food['source']; barcode?: string; imageUrl?: string }[];
   plan: TrainingPlan | null;
   sessions: WorkoutSession[];
   activeSession: WorkoutSession | null;
@@ -50,7 +59,8 @@ export interface AppState {
   updateFood: (day: string, id: string, e: Partial<FoodEntry>) => void;
   deleteFood: (day: string, id: string) => void;
   rememberFood: (f: Food, grams: number) => void;
-  saveCustomFood: (f: Food) => void;
+  /** @param replacesId id of the product this one corrects (e.g. an Open Food Facts entry) – recents are re-pointed */
+  saveCustomFood: (f: Food, replacesId?: string) => void;
   deleteCustomFood: (id: string) => void;
   setDayActivity: (day: string, a: Partial<DayActivity>) => void;
   addActivity: (day: string, a: Omit<ActivityEntry, 'id'>) => void;
@@ -86,11 +96,11 @@ export const useApp = create<AppState>()(
       setProfile: (p) => set({ profile: { ...get().profile, ...p } }),
       addMeasurement: (m) => {
         const full = { ...m, id: uid() };
-        set({ measurements: [...get().measurements, full].sort((a, b) => a.date.localeCompare(b.date)) });
+        set({ measurements: saneMeasurements([...get().measurements, full]) });
         return full;
       },
       updateMeasurement: (id, m) =>
-        set({ measurements: get().measurements.map((x) => (x.id === id ? { ...x, ...m } : x)).sort((a, b) => a.date.localeCompare(b.date)) }),
+        set({ measurements: saneMeasurements(get().measurements.map((x) => (x.id === id ? { ...x, ...m } : x))) }),
       deleteMeasurement: (id) => set({ measurements: get().measurements.filter((x) => x.id !== id) }),
       addFood: (day, e) => {
         const list = get().food[day] ?? [];
@@ -110,14 +120,22 @@ export const useApp = create<AppState>()(
       rememberFood: (f, grams) => {
         const rest = get().recentFoods.filter((r) => r.id !== f.id);
         set({
-          recentFoods: [{ id: f.id, name: f.name, brand: f.brand, per100: f.per100, units: f.units, lastGrams: grams, source: f.source }, ...rest].slice(0, 40),
+          recentFoods: [
+            { id: f.id, name: f.name, brand: f.brand, per100: f.per100, units: f.units, lastGrams: grams, source: f.source, barcode: f.barcode, imageUrl: f.imageUrl },
+            ...rest,
+          ].slice(0, 40),
         });
       },
-      saveCustomFood: (f) => {
-        const rest = get().customFoods.filter((x) => x.id !== f.id && (!f.barcode || x.barcode !== f.barcode));
-        set({ customFoods: [f, ...rest] });
+      saveCustomFood: (f, replacesId) => {
+        const nb = (c?: string) => (c ? c.replace(/\D/g, '').replace(/^0+/, '') : '');
+        const same = (x: { id: string; barcode?: string }) => x.id === f.id || x.id === replacesId || (!!f.barcode && nb(x.barcode) === nb(f.barcode));
+        const rest = get().customFoods.filter((x) => !same(x));
+        // keep "recent" rows in sync with the corrected values
+        const recents = get().recentFoods.map((r) => (same(r) ? { ...r, id: f.id, name: f.name, brand: f.brand, per100: f.per100, units: f.units, source: f.source, barcode: f.barcode ?? r.barcode, imageUrl: f.imageUrl ?? r.imageUrl } : r));
+        const seen = new Set<string>();
+        set({ customFoods: [f, ...rest], recentFoods: recents.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true))) });
       },
-      deleteCustomFood: (id) => set({ customFoods: get().customFoods.filter((x) => x.id !== id) }),
+      deleteCustomFood: (id) => set({ customFoods: get().customFoods.filter((x) => x.id !== id), recentFoods: get().recentFoods.filter((x) => x.id !== id) }),
       setDayActivity: (day, a) => {
         const cur = get().activity[day] ?? { activities: [] };
         set({ activity: { ...get().activity, [day]: { ...cur, ...a } } });
@@ -170,7 +188,7 @@ export const useApp = create<AppState>()(
         set({
           onboarded: data.onboarded ?? true,
           profile: { ...DEFAULT_PROFILE, ...(data.profile ?? {}) },
-          measurements: data.measurements ?? [],
+          measurements: saneMeasurements(data.measurements),
           food: data.food ?? {},
           activity: data.activity ?? {},
           customFoods: data.customFoods ?? [],
@@ -210,6 +228,7 @@ export const useApp = create<AppState>()(
         return {
           ...current,
           ...p,
+          measurements: saneMeasurements(p.measurements),
           profile: { ...DEFAULT_PROFILE, ...(p.profile ?? {}), food: { ...DEFAULT_PROFILE.food, ...(p.profile?.food ?? {}) }, training: { ...DEFAULT_PROFILE.training, ...(p.profile?.training ?? {}) } },
         };
       },

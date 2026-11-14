@@ -200,9 +200,13 @@ export interface ActivityEntry {
   kcal: number;
   source: 'workout' | 'cardio' | 'manual';
   sessionId?: string;
+  /** walking / running – already covered by the step count in "steps" mode */
+  stepBased?: boolean;
 }
 
 export interface DayActivity {
+  /** user's decision for a day with suspiciously little food logged: true = "that's really all I ate", false = don't count */
+  complete?: boolean;
   steps?: number;
   /** "Active calories" from a watch / Samsung Health, entered manually. */
   watchActiveKcal?: number;

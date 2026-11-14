@@ -64,22 +64,30 @@ export interface DayExpenditure {
   mode: ActivityMode;
 }
 
-export function dayExpenditure(profile: Profile, comp: Composition, act: DayActivity | undefined, fraction = 1): DayExpenditure {
+/**
+ * @param fraction    share of the day's clock time that is counted (BMR / lifestyle part)
+ * @param cumFraction share of the day's cumulative user-entered values (steps, watch kcal) that is counted;
+ *                    today's values are "so far" numbers, so they are NOT scaled by the elapsed time.
+ */
+export function dayExpenditure(profile: Profile, comp: Composition, act: DayActivity | undefined, fraction = 1, cumFraction = fraction): DayExpenditure {
   const bmr = bmrKatch(comp.ffm);
-  const actKcal = (act?.activities ?? []).reduce((s, a) => s + a.kcal, 0);
   let mode = profile.activityMode;
   if (mode === 'watch' && !(act?.watchActiveKcal && act.watchActiveKcal > 0)) mode = 'lifestyle';
   if (mode === 'steps' && !(act?.steps && act.steps > 0)) mode = 'lifestyle';
+  const acts = act?.activities ?? [];
   if (mode === 'watch') {
     const base = bmr * 1.1 * fraction;
-    const watch = (act!.watchActiveKcal ?? 0) * fraction;
+    const watch = (act!.watchActiveKcal ?? 0) * cumFraction;
     return { bmr, base, steps: 0, activities: 0, watch, total: base + watch, mode };
   }
   if (mode === 'steps') {
     const base = bmr * 1.15 * fraction;
-    const st = stepsKcal(act!.steps ?? 0, comp.weight, profile.heightCm) * fraction;
+    const st = stepsKcal(act!.steps ?? 0, comp.weight, profile.heightCm) * cumFraction;
+    // walking / running sessions are already inside the step count
+    const actKcal = acts.filter((a) => !a.stepBased).reduce((s, a) => s + a.kcal, 0);
     return { bmr, base, steps: st, activities: actKcal, watch: 0, total: base + st + actKcal, mode };
   }
+  const actKcal = acts.reduce((s, a) => s + a.kcal, 0);
   const base = bmr * profile.activityFactor * fraction;
   return { bmr, base, steps: 0, activities: actKcal, watch: 0, total: base + actKcal, mode: 'lifestyle' };
 }
@@ -118,6 +126,19 @@ export interface LedgerDay {
   logged: boolean;
   partial: boolean;
   fatDelta: number; // kg (balance / 7700)
+  /** counted share of the day (1 = full day) */
+  frac: number;
+  /** past day with implausibly little food logged – not counted until the user confirms it */
+  suspect?: boolean;
+}
+
+/** A finished day with less than this share of BMR logged is treated as "forgot to log" unless confirmed. */
+export const SUSPECT_BMR_SHARE = 0.45;
+
+export function isSuspectDay(intakeKcal: number, bmr: number, act: DayActivity | undefined): boolean {
+  if (act?.complete === true) return false;
+  if (act?.complete === false) return true;
+  return intakeKcal < bmr * SUSPECT_BMR_SHARE;
 }
 
 export interface LedgerInput {
@@ -160,6 +181,9 @@ export function liveState(input: LedgerInput, at: Date = new Date(), bias = 0): 
   const days: LedgerDay[] = [];
   let balance = 0;
   let missing = 0;
+  const aMs = aDate.getTime();
+  const atMs = at.getTime();
+  const bmr = bmrKatch(comp.ffm);
   for (let k = startKey; k <= endKey; k = addDays(k, 1)) {
     const all = input.food[k] ?? [];
     const isStart = k === startKey;
@@ -167,23 +191,26 @@ export function liveState(input: LedgerInput, at: Date = new Date(), bias = 0): 
     const f0 = isStart ? dayFraction(aDate) : 0;
     const f1 = isEnd ? dayFraction(at) : 1;
     const frac = Math.max(0, f1 - f0);
-    const startMs = isStart ? aDate.getTime() : fromKey(k).getTime();
-    const endMs = isEnd ? at.getTime() : fromKey(k).getTime() + 86400000;
-    const entries = all.filter((e) => {
-      const t = new Date(e.time).getTime();
-      return t >= startMs && t <= endMs;
-    });
-    const logged = all.length > 0;
+    // Day membership comes from the diary key (robust to time-zone changes and DST); the timestamps only cut
+    // the ledger at its two ends: nothing eaten before the weigh-in, nothing after the evaluated moment.
+    const inLedger = (iso: string) => {
+      const t = new Date(iso).getTime();
+      return (!isStart || t >= aMs) && (!isEnd || t <= atMs);
+    };
+    const entries = isStart || isEnd ? all.filter((e) => inLedger(e.time)) : all;
     const act = input.activity[k];
-    const actFiltered: DayActivity | undefined = act
-      ? { ...act, activities: act.activities.filter((a) => new Date(a.time).getTime() >= startMs && new Date(a.time).getTime() <= endMs) }
-      : undefined;
+    const actFiltered: DayActivity | undefined = act && (isStart || isEnd) ? { ...act, activities: act.activities.filter((a) => inLedger(a.time)) } : act;
     const intake = sumMacros(entries).kcal;
-    const exp = dayExpenditure(input.profile, comp, actFiltered, frac).total + bias * frac;
+    // cumulative day values (steps / watch kcal): today's are "so far"; on the weigh-in day only the part after it counts
+    const cumFrac = isEnd ? (isStart && f1 > 0 ? frac / f1 : 1) : isStart ? 1 - f0 : 1;
+    const exp = dayExpenditure(input.profile, comp, actFiltered, frac, cumFrac).total + bias * frac;
+    let logged = entries.length > 0;
+    const suspect = logged && !isStart && !isEnd && isSuspectDay(intake, bmr, act);
+    if (suspect) logged = false;
     const bal = logged ? intake - exp : 0;
-    if (!logged && !isEnd) missing++;
+    if (!logged && !isEnd && !isStart) missing++;
     balance += bal;
-    days.push({ key: k, intake, expenditure: exp, balance: bal, logged, partial: frac < 0.999, fatDelta: bal / KCAL_PER_KG_FAT });
+    days.push({ key: k, intake, expenditure: exp, balance: bal, logged, partial: frac < 0.999, fatDelta: bal / KCAL_PER_KG_FAT, frac, suspect });
   }
   const fatDelta = balance / KCAL_PER_KG_FAT;
   const fatKg = Math.max(1.5, comp.fatKg + fatDelta);
@@ -215,10 +242,12 @@ export function dailyBalances(input: LedgerInput, fromKeyStr: string, toKeyStr: 
     const isToday = k === today;
     const frac = isToday ? dayFraction() : 1;
     const intake = sumMacros(entries).kcal;
-    const exp = dayExpenditure(input.profile, comp, input.activity[k], frac).total + bias * frac;
-    const logged = entries.length > 0;
+    const exp = dayExpenditure(input.profile, comp, input.activity[k], frac, 1).total + bias * frac;
+    let logged = entries.length > 0;
+    const suspect = logged && !isToday && isSuspectDay(intake, bmrKatch(comp.ffm), input.activity[k]);
+    if (suspect) logged = false;
     const bal = logged ? intake - exp : 0;
-    out.push({ key: k, intake, expenditure: exp, balance: bal, logged, partial: isToday, fatDelta: bal / KCAL_PER_KG_FAT });
+    out.push({ key: k, intake, expenditure: exp, balance: bal, logged, partial: isToday, fatDelta: bal / KCAL_PER_KG_FAT, frac, suspect });
   }
   return out;
 }
@@ -251,10 +280,10 @@ export function monthSummaries(days: LedgerDay[]): MonthSummary[] {
 }
 
 /** Average daily balance over the last N fully logged days (excluding today). */
-export function recentAvgBalance(input: LedgerInput, n = 14): { avg: number; days: number } | null {
+export function recentAvgBalance(input: LedgerInput, n = 14, bias = 0): { avg: number; days: number } | null {
   const today = dayKey();
   const from = addDays(today, -n);
-  const days = dailyBalances(input, from, addDays(today, -1)).filter((d) => d.logged);
+  const days = dailyBalances(input, from, addDays(today, -1), bias).filter((d) => d.logged);
   if (days.length < 3) return null;
   return { avg: days.reduce((s, d) => s + d.balance, 0) / days.length, days: days.length };
 }
@@ -270,36 +299,39 @@ export interface Calibration {
   biasPerDay: number;
 }
 
-/** Compare the ledger prediction with the next real measurement. */
+/**
+ * Compare the ledger prediction with real measurements. Windows span ≥ 14 days: from a measurement to the first
+ * later one that is at least two weeks away (so weekly weigh-ins still calibrate).
+ */
 export function calibrations(input: LedgerInput): Calibration[] {
   const ms = sortedMeasurements(input.measurements);
   const out: Calibration[] = [];
-  for (let i = 0; i < ms.length - 1; i++) {
+  let i = 0;
+  while (i < ms.length - 1) {
     const a = ms[i];
-    const b = ms[i + 1];
+    let j = i + 1;
+    while (j < ms.length && (new Date(ms[j].date).getTime() - new Date(a.date).getTime()) / 86400000 < 14) j++;
+    if (j >= ms.length) break;
+    const b = ms[j];
+    i = j;
     const days = (new Date(b.date).getTime() - new Date(a.date).getTime()) / 86400000;
-    if (days < 13) continue;
     const st = liveState({ ...input, measurements: [a] }, new Date(b.date));
     if (!st) continue;
-    const loggedDays = st.days.filter((d) => d.logged).length;
-    const coverage = loggedDays / Math.max(1, st.days.length);
-    if (coverage < 0.7) continue;
+    const loggedDays = st.days.filter((d) => d.logged);
+    const countedDays = loggedDays.reduce((s, d) => s + d.frac, 0);
+    const coverage = countedDays / Math.max(1e-6, st.days.reduce((s, d) => s + d.frac, 0));
+    if (coverage < 0.7 || countedDays < 7) continue;
     const predicted = st.fatKg - a.fatKg;
     const actual = b.fatKg - a.fatKg;
-    out.push({
-      from: a,
-      to: b,
-      days,
-      coverage,
-      predictedFat: predicted,
-      actualFat: actual,
-      biasPerDay: ((predicted - actual) * KCAL_PER_KG_FAT) / (days * coverage),
-    });
+    out.push({ from: a, to: b, days, coverage, predictedFat: predicted, actualFat: actual, biasPerDay: ((predicted - actual) * KCAL_PER_KG_FAT) / countedDays });
   }
   return out;
 }
 
-/** Weighted bias from recent calibrations, clamped to ±500 kcal/day. */
+/**
+ * Evidence-weighted bias from the latest calibration windows, clamped to ±500 kcal/day.
+ * Bio-impedance fat readings are noisy (±1–1.5 kg), so the correction is shrunk until ~6 weeks of logged data exist.
+ */
 export function calibrationBias(input: LedgerInput): number {
   const cs = calibrations(input).slice(-3);
   if (!cs.length) return 0;
@@ -310,7 +342,8 @@ export function calibrationBias(input: LedgerInput): number {
     w += ww;
     s += c.biasPerDay * ww;
   }
-  return Math.max(-500, Math.min(500, s / w));
+  const shrink = Math.min(1, w / 42);
+  return Math.max(-500, Math.min(500, (s / w) * shrink));
 }
 
 export function forecast(comp: Composition, avgBalance: number, days: number): Composition {
@@ -322,6 +355,8 @@ export function forecast(comp: Composition, avgBalance: number, days: number): C
 /** US Navy body-fat estimate (cm). */
 export function navyBodyFat(sex: 'male' | 'female', heightCm: number, waistCm: number, neckCm: number, hipCm?: number): number {
   const inch = (x: number) => x / 2.54;
+  // the logarithm needs waist (+ hips) clearly larger than the neck; otherwise the inputs are wrong
+  if ((sex === 'male' ? waistCm : waistCm + (hipCm ?? waistCm * 1.35)) - neckCm <= 1) return NaN;
   if (sex === 'male') {
     return 86.01 * Math.log10(inch(waistCm) - inch(neckCm)) - 70.041 * Math.log10(inch(heightCm)) + 36.76;
   }

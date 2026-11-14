@@ -44,24 +44,40 @@ function fieldFor(key: string): MField | 'date' | null {
   return null;
 }
 
+/** Accept a date only if it is real, not in the future (+5 min tolerance) and not absurdly old. */
+function validDate(d: Date): string | undefined {
+  const t = d.getTime();
+  if (!Number.isFinite(t)) return undefined;
+  if (t > Date.now() + 5 * 60000 || d.getFullYear() < 2015) return undefined;
+  return d.toISOString();
+}
+
+function ymd(y: number, m: number, d: number, hh = 9, mm = 0): string | undefined {
+  if (m < 1 || m > 12 || d < 1 || d > 31 || hh > 23 || mm > 59) return undefined;
+  const dt = new Date(y, m - 1, d, hh, mm);
+  if (dt.getMonth() !== m - 1 || dt.getDate() !== d) return undefined; // e.g. 31 February
+  return validDate(dt);
+}
+
 export function parseDateLoose(v: string): string | undefined {
   const s = v.trim();
   if (!s) return undefined;
   if (/^\d{10,13}$/.test(s)) {
     const n = Number(s);
-    const d = new Date(s.length === 13 ? n : n * 1000);
-    if (d.getFullYear() > 2000 && d.getFullYear() < 2100) return d.toISOString();
+    return validDate(new Date(s.length === 13 ? n : n * 1000));
   }
   let m = s.match(/^(\d{4})(\d{2})(\d{2})(?:(\d{2})(\d{2})(\d{2})?)?$/);
-  if (m) return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] ?? 9), +(m[5] ?? 0)).toISOString();
+  if (m) return ymd(+m[1], +m[2], +m[3], +(m[4] ?? 9), +(m[5] ?? 0));
   m = s.match(/^(\d{1,2})[./](\d{1,2})[./](\d{2,4})(?:[ T,]+(\d{1,2}):(\d{2}))?/);
   if (m) {
     const y = m[3].length === 2 ? 2000 + +m[3] : +m[3];
-    return new Date(y, +m[2] - 1, +m[1], +(m[4] ?? 9), +(m[5] ?? 0)).toISOString();
+    let day = +m[1];
+    let mon = +m[2];
+    if (mon > 12 && day <= 12) [day, mon] = [mon, day]; // US-style month/day
+    return ymd(y, mon, day, +(m[4] ?? 9), +(m[5] ?? 0));
   }
   const d = new Date(s.replace(' ', 'T'));
-  if (!isNaN(d.getTime()) && d.getFullYear() > 2000) return d.toISOString();
-  return undefined;
+  return validDate(d);
 }
 
 export interface QrParse {

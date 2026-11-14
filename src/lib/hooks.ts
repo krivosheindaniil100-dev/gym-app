@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useApp } from './store';
-import { calibrationBias, compFromMeasurement, liveState, sortedMeasurements, type Composition, type LiveState } from './energy';
+import { calibrationBias, compFromMeasurement, liveState, sortedMeasurements, stepsKcal, type Composition, type LiveState } from './energy';
 import { computeTargets, type Targets } from './nutrition';
 import { addDays, dayKey } from './date';
 
@@ -42,19 +42,22 @@ export function useTargets(comp: Composition | null): Targets | null {
   const profile = useApp((s) => s.profile);
   const plan = useApp((s) => s.plan);
   const activity = useApp((s) => s.activity);
+  const bias = useBias();
   return useMemo(() => {
     if (!comp) return null;
-    let avgWatch: number | undefined;
-    if (profile.activityMode === 'watch') {
+    const recent = (pick: (k: string) => number | undefined) => {
       const vals: number[] = [];
       for (let i = 1; i <= 7; i++) {
-        const v = activity[addDays(dayKey(), -i)]?.watchActiveKcal;
+        const v = pick(addDays(dayKey(), -i));
         if (v) vals.push(v);
       }
-      if (vals.length) avgWatch = vals.reduce((a, b) => a + b, 0) / vals.length;
-    }
-    return computeTargets(profile, comp, plan, avgWatch);
-  }, [profile, plan, comp?.ffm, comp?.weight, activity]);
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : undefined;
+    };
+    const avgWatch = profile.activityMode === 'watch' ? recent((k) => activity[k]?.watchActiveKcal) : undefined;
+    const avgStepsKcal =
+      profile.activityMode === 'steps' ? recent((k) => (activity[k]?.steps ? stepsKcal(activity[k].steps!, comp.weight, profile.heightCm) : undefined)) : undefined;
+    return computeTargets(profile, comp, plan, { avgWatch, avgStepsKcal, bias });
+  }, [profile, plan, comp?.ffm, comp?.weight, activity, bias]);
 }
 
 export function useLatestMeasurement() {

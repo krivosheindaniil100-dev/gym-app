@@ -18,6 +18,7 @@ import { fmt, Ring, signed, toast } from '../ui/kit';
 import MeasurementSheet from './MeasurementSheet';
 import SettingsSheet from './Settings';
 import type { Tab } from '../App';
+import type { Measurement } from '../lib/types';
 
 const FORECAST_DAYS = 84;
 
@@ -47,21 +48,21 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
 
   const minT = first ? Math.min(0, -Math.ceil((now.getTime() - new Date(first.date).getTime()) / 86400000)) : 0;
 
-  const recent = useMemo(() => recentAvgBalance(input, 14), [input]);
+  const recent = useMemo(() => recentAvgBalance(input, 14, bias), [input, bias, dayKey(now)]);
   const pace = recent ? { avg: recent.avg, src: 'по факту 14 дн.' } : targets ? { avg: targets.dailyDelta, src: 'по плану питания' } : null;
 
   // composition at the selected moment
-  const shown: { comp: Composition; mode: 'live' | 'history' | 'forecast'; label: string } | null = useMemo(() => {
+  const shown: { comp: Composition; mode: 'live' | 'history' | 'forecast'; label: string; anchor: Measurement } | null = useMemo(() => {
     if (!live) return null;
-    if (t === 0) return { comp: live, mode: 'live', label: 'Сейчас' };
+    if (t === 0) return { comp: live, mode: 'live', label: 'Сейчас', anchor: live.anchor };
     if (t < 0) {
       const at = new Date(fromKey(addDays(dayKey(now), t)).getTime() + 20 * 3600 * 1000);
       const st = liveState(input, at, bias);
-      if (!st) return { comp: compFromMeasurement(first!), mode: 'history', label: fmtDay(first!.date, true) };
-      return { comp: st, mode: 'history', label: fmtDay(addDays(dayKey(now), t), true) };
+      if (!st) return { comp: compFromMeasurement(first!), mode: 'history', label: fmtDay(first!.date, true), anchor: first! };
+      return { comp: st, mode: 'history', label: fmtDay(addDays(dayKey(now), t), true), anchor: st.anchor };
     }
     const fc = forecast(live, pace?.avg ?? 0, t);
-    return { comp: fc, mode: 'forecast', label: fmtDay(addDays(dayKey(now), t), true) };
+    return { comp: fc, mode: 'forecast', label: fmtDay(addDays(dayKey(now), t), true), anchor: live.anchor };
   }, [t, live, input, bias, now.getTime(), pace?.avg]);
 
   const bodyInput = shown ? humanInputFor(profile, shown.comp) : null;
@@ -96,7 +97,7 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
     const days = dailyBalances(input, start < (first ? dayKey(first.date) : start) ? dayKey(first!.date) : start, today, bias);
     const logged = days.filter((d) => d.logged);
     return { balance: logged.reduce((s, d) => s + d.balance, 0), logged: logged.length, total: days.length };
-  }, [input, today, bias, first?.id]);
+  }, [input, today, bias, first?.id, Math.floor(now.getTime() / 60000)]);
 
   const startQr = async () => {
     tap();
@@ -224,7 +225,7 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
           style={{ ['--now' as string]: `${nowFrac}%` }}
           onChange={(e) => {
             let v = Number(e.target.value);
-            if (Math.abs(v) <= 2) v = 0;
+            if (Math.abs(v) <= 1) v = 0;
             setT(v);
           }}
         />
@@ -242,9 +243,9 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
 
       {/* stats */}
       <div className="grid2">
-        <Stat label="Вес" value={fmt(c.weight, 1)} unit="кг" delta={c.weight - anchor.weight} d={2} hint="с замера" invert />
+        <Stat label="Вес" value={fmt(c.weight, 1)} unit="кг" delta={c.weight - shown.anchor.weight} d={2} hint="с замера" invert />
         <Stat label="Жир" value={fmt(c.fatPct, 1)} unit="%" sub={cat.label} tone={cat.tone} />
-        <Stat label="Масса жира" value={fmt(c.fatKg, 2)} unit="кг" delta={c.fatKg - anchor.fatKg} d={2} hint="с замера" invert />
+        <Stat label="Масса жира" value={fmt(c.fatKg, 2)} unit="кг" delta={c.fatKg - shown.anchor.fatKg} d={2} hint="с замера" invert />
         <Stat label="Скелетные мышцы" value={fmt(c.smm, 1)} unit="кг" delta={first ? c.smm - (first.smm ?? c.smm) : 0} d={1} hint="со старта" />
         <Stat label="Безжировая масса" value={fmt(c.ffm, 1)} unit="кг" />
         <Stat label="FFMI" value={fmt(ffmi(c.ffm, profile.heightCm), 1)} sub={ffmiLabel(ffmi(c.ffm, profile.heightCm), profile.sex)} />
@@ -296,7 +297,7 @@ export default function BodyScreen({ active, onNavigate }: { active: boolean; on
           <div className="note" style={{ marginTop: 12, marginBottom: 0 }}>
             <AlertTriangle size={16} />
             <div>
-              {live.missingDays} дн. без записей еды с последнего замера — они не учитываются (считаются как поддержание), чтобы забытый дневник не выглядел как голодовка.
+              {live.missingDays} дн. с последнего замера без записей еды или с явно неполным дневником — они не учитываются (считаются как поддержание), чтобы забытый дневник не выглядел как голодовка.
             </div>
           </div>
         )}

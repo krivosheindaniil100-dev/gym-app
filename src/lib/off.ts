@@ -8,6 +8,13 @@ export interface OffResult {
   servingGrams?: number;
   quality: 'ok' | 'check' | 'incomplete';
   note?: string;
+  /** nutrition fields absent in the database (the user has to fill them in) */
+  missing?: ('kcal' | 'p' | 'f' | 'c')[];
+}
+
+/** Digits only, without leading zeros – so EAN-13 "0012345678905" and UPC-A "012345678905" compare equal. */
+export function normBarcode(code: string): string {
+  return code.replace(/\D/g, '').replace(/^0+/, '');
 }
 
 function n(v: unknown): number | undefined {
@@ -39,14 +46,21 @@ function toFood(p: any): OffResult | null {
   if (!name && kcal === undefined) return null;
   let quality: OffResult['quality'] = 'ok';
   let note: string | undefined;
-  if (kcal === undefined || p_ === undefined || f_ === undefined || c_ === undefined) {
+  // kcal alone can be derived from the macros
+  if (kcal === undefined && p_ !== undefined && f_ !== undefined && c_ !== undefined) kcal = 4 * p_ + 9 * f_ + 4 * c_ + 2 * (fiber ?? 0);
+  const missing: NonNullable<OffResult['missing']> = [];
+  if (kcal === undefined) missing.push('kcal');
+  if (p_ === undefined) missing.push('p');
+  if (f_ === undefined) missing.push('f');
+  if (c_ === undefined) missing.push('c');
+  if (missing.length) {
     quality = 'incomplete';
     note = 'В базе не хватает части КБЖУ — проверьте по этикетке.';
   } else {
-    const calc = 4 * p_ + 9 * f_ + 4 * c_ + 2 * (fiber ?? 0);
-    if (kcal > 0 && Math.abs(calc - kcal) / kcal > 0.2) {
+    const calc = 4 * p_! + 9 * f_! + 4 * c_! + 2 * (fiber ?? 0);
+    if (kcal! > 0 && Math.abs(calc - kcal!) / kcal! > 0.2) {
       quality = 'check';
-      note = `Калорийность (${Math.round(kcal)}) не сходится с БЖУ (${Math.round(calc)}) — сверьте с этикеткой.`;
+      note = `Калорийность (${Math.round(kcal!)}) не сходится с БЖУ (${Math.round(calc)}) — сверьте с этикеткой.`;
     }
   }
   const food: Food = {
@@ -66,7 +80,7 @@ function toFood(p: any): OffResult | null {
     source: 'off',
     imageUrl: p.image_front_small_url,
   };
-  return { food, servingGrams: serving, quality, note };
+  return { food, servingGrams: serving && serving > 0 && serving < 2000 ? serving : undefined, quality, note, missing: missing.length ? missing : undefined };
 }
 
 async function getJson(url: string, timeoutMs = 9000) {
@@ -74,6 +88,7 @@ async function getJson(url: string, timeoutMs = 9000) {
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const r = await fetch(url, { signal: ctl.signal, headers: { Accept: 'application/json' } });
+    if (r.status === 404) return null; // unknown product is an answer, not a network failure
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
   } finally {
@@ -96,5 +111,5 @@ export async function searchOff(query: string): Promise<OffResult[]> {
     12000,
   );
   const arr: any[] = j?.products ?? [];
-  return arr.map(toFood).filter((x): x is OffResult => !!x && x.food.per100.kcal > 0);
+  return arr.map(toFood).filter((x): x is OffResult => !!x && x.quality !== 'incomplete' && x.food.per100.kcal > 0);
 }

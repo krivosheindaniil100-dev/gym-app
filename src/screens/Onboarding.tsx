@@ -68,7 +68,10 @@ export default function Onboarding() {
   if (knowFat === 'yes') estFat = fatPct;
   else if (knowFat === 'tape' && waist && neck && (p.sex === 'male' || hips)) estFat = navyBodyFat(p.sex, p.heightCm, waist, neck, hips);
   else if (knowFat === 'no' && weight) estFat = deurenbergBodyFat(p.sex, weight, p.heightCm, age);
+  if (estFat !== undefined && !Number.isFinite(estFat)) estFat = undefined;
   if (estFat !== undefined) estFat = Math.max(3, Math.min(60, estFat));
+  const weightOk = !!weight && weight >= 25 && weight <= 350;
+  const tapeError = knowFat === 'tape' && !!waist && !!neck && waist - neck <= 1;
 
   const scan = async () => {
     try {
@@ -92,7 +95,7 @@ export default function Onboarding() {
   };
 
   const finish = () => {
-    if (!weight || estFat === undefined) return;
+    if (!weight || !weightOk || estFat === undefined) return;
     const fatKg = (weight * estFat) / 100;
     const ffm = weight - fatKg;
     st.addMeasurement({
@@ -109,7 +112,7 @@ export default function Onboarding() {
     st.setOnboarded(true);
   };
 
-  const canNext = [true, p.heightCm > 120 && p.heightCm < 230 && age > 10 && age < 100, !!weight && estFat !== undefined, true, true][step];
+  const canNext = [true, p.heightCm > 120 && p.heightCm < 230 && age > 10 && age < 100, weightOk && estFat !== undefined, true, true][step];
 
   return (
     <div className="onb">
@@ -243,11 +246,12 @@ export default function Onboarding() {
                   <NumField value={hips} onChange={setHips} suffix="см" />
                 </div>
               )}
-              <p className="small muted">Формула ВМС США, точность ±3–4%.</p>
+              {tapeError ? <p className="small bad">Талия должна быть заметно больше шеи — проверь, не перепутаны ли поля.</p> : <p className="small muted">Формула ВМС США, точность ±3–4%.</p>}
             </>
           )}
           {knowFat === 'no' && <p className="small muted">Оценим по ИМТ и возрасту (точность ±5%). Позже обнови по весам — модель пересчитается.</p>}
-          {weight && estFat !== undefined && (
+          {!!weight && !weightOk && <p className="small bad">Вес должен быть от 25 до 350 кг.</p>}
+          {weightOk && weight && estFat !== undefined && (
             <div className="card glow">
               <div className="kv">
                 <span className="k">Жир</span>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { pushBack, tap } from '../lib/native';
 
@@ -168,7 +168,7 @@ export function ToastHost() {
   );
 }
 
-/** Numeric text field that lets the user type freely (comma or dot). */
+/** Numeric text field that lets the user type freely (comma or dot). Non-negative unless `allowNegative`. */
 export function NumField({
   value,
   onChange,
@@ -176,8 +176,9 @@ export function NumField({
   placeholder,
   big,
   autoFocus,
-  step,
   className,
+  max,
+  allowNegative,
 }: {
   value: number | undefined;
   onChange: (v: number | undefined) => void;
@@ -185,34 +186,55 @@ export function NumField({
   placeholder?: string;
   big?: boolean;
   autoFocus?: boolean;
-  step?: number;
   className?: string;
+  /** values above are clamped */
+  max?: number;
+  allowNegative?: boolean;
 }) {
-  const [text, setText] = useState(value === undefined || Number.isNaN(value) ? '' : String(value));
+  const show = (v: number | undefined) => (v === undefined || Number.isNaN(v) ? '' : String(Math.round(v * 100) / 100));
+  const [text, setText] = useState(() => show(value));
   const last = useRef(value);
-  useEffect(() => {
-    if (value !== last.current) {
-      last.current = value;
-      const cur = Number(text.replace(',', '.'));
-      if (value === undefined) setText('');
-      else if (cur !== value) setText(String(Math.round(value * 100) / 100));
+  const ref = useRef<HTMLInputElement>(null);
+  const reselect = useRef(false);
+  // derive the text from an externally changed value during render (no one-frame lag, no stale text)
+  if (value !== last.current) {
+    last.current = value;
+    const cur = text.trim() === '' ? undefined : Number(text.replace(',', '.'));
+    if (cur !== value) {
+      setText(show(value));
+      reselect.current = true; // replaced from outside (chip, reset): the next typing must replace it
     }
-  }, [value]);
+  }
+  useLayoutEffect(() => {
+    if (reselect.current) {
+      reselect.current = false;
+      if (document.activeElement === ref.current) ref.current?.select();
+    }
+  });
   return (
     <div className="input-wrap">
       <input
+        ref={ref}
         className={`input ${big ? 'big-input' : ''} ${className ?? ''}`}
         inputMode="decimal"
+        enterKeyHint="done"
         value={text}
         placeholder={placeholder}
         autoFocus={autoFocus}
-        step={step}
         onFocus={(e) => e.currentTarget.select()}
+        onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
         onChange={(e) => {
-          const t = e.target.value.replace(/[^\d.,-]/g, '');
+          let t = e.target.value.replace(allowNegative ? /[^\d.,-]/g : /[^\d.,]/g, '');
+          // a single decimal separator
+          const i = t.search(/[.,]/);
+          if (i >= 0) t = t.slice(0, i + 1) + t.slice(i + 1).replace(/[.,]/g, '');
+          let v: number | undefined = t.trim() === '' ? undefined : Number(t.replace(',', '.'));
+          if (v !== undefined && Number.isNaN(v)) v = undefined;
+          if (v !== undefined && max !== undefined && v > max) {
+            v = max;
+            t = String(max);
+          }
           setText(t);
-          const n = Number(t.replace(',', '.'));
-          const v = t === '' || Number.isNaN(n) ? undefined : n;
           last.current = v;
           onChange(v);
         }}

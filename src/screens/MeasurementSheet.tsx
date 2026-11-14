@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ExternalLink, QrCode } from 'lucide-react';
 import { Chips, NumField, Sheet, toast, fmt } from '../ui/kit';
 import { useApp } from '../lib/store';
@@ -15,7 +15,7 @@ function toLocalInput(iso: string) {
 
 const MAP_FIELDS: MField[] = ['weight', 'fatPct', 'fatKg', 'smm', 'ffm', 'water', 'visceral', 'bmr'];
 
-export default function MeasurementSheet({
+function MeasurementBody({
   open,
   onClose,
   parsed,
@@ -31,34 +31,27 @@ export default function MeasurementSheet({
   const del = useApp((s) => s.deleteMeasurement);
   const learnQr = useApp((s) => s.learnQr);
   const sex = useApp((s) => s.profile.sex);
-  const [date, setDate] = useState(toLocalInput(new Date().toISOString()));
-  const [f, setF] = useState<Partial<Record<MField, number>>>({});
-  const [mapping, setMapping] = useState<Partial<Record<MField, number>>>({});
-  const [assignIdx, setAssignIdx] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    if (edit) {
-      setDate(toLocalInput(edit.date));
-      setF({ weight: edit.weight, fatPct: edit.fatPct, smm: edit.smm, visceral: edit.visceral, water: edit.water, bmr: edit.bmr });
-    } else if (parsed) {
-      setDate(toLocalInput(parsed.date ?? new Date().toISOString()));
+  // state is initialised synchronously from the props (the body is remounted for every opening)
+  const [date, setDate] = useState(() => toLocalInput(edit ? edit.date : (parsed?.date ?? new Date().toISOString())));
+  const [f, setF] = useState<Partial<Record<MField, number>>>(() => {
+    if (edit) return { weight: edit.weight, fatPct: edit.fatPct, smm: edit.smm, visceral: edit.visceral, water: edit.water, bmr: edit.bmr };
+    if (parsed) {
       const pf = { ...parsed.fields };
       if (pf.fatPct === undefined && pf.fatKg !== undefined && pf.weight) pf.fatPct = Math.round((pf.fatKg / pf.weight) * 1000) / 10;
-      setF(pf);
-      setMapping({});
-    } else {
-      setDate(toLocalInput(new Date().toISOString()));
-      setF({});
+      return pf;
     }
-    setAssignIdx(null);
-  }, [open, parsed, edit]);
+    return {};
+  });
+  const [mapping, setMapping] = useState<Partial<Record<MField, number>>>({});
+  const [assignIdx, setAssignIdx] = useState<number | null>(null);
+  const dateMs = new Date(date).getTime();
+  const dateError = !date || Number.isNaN(dateMs) ? 'Укажи дату и время замера.' : dateMs > Date.now() + 5 * 60000 ? 'Замер не может быть из будущего.' : dateMs < new Date(2015, 0, 1).getTime() ? 'Слишком старая дата.' : null;
 
   const done = useMemo(() => completeFields(f), [f]);
   const needsMapping = parsed?.kind === 'numbers' && Object.keys(parsed.fields).length === 0;
 
   const save = () => {
-    if (!done) return;
+    if (!done || dateError) return;
     const m: Omit<Measurement, 'id'> = {
       date: new Date(date).toISOString(),
       source: parsed ? 'qr' : edit?.source ?? 'manual',
@@ -82,7 +75,7 @@ export default function MeasurementSheet({
 
   return (
     <Sheet
-      open={open}
+      open
       onClose={onClose}
       full
       title={edit ? 'Замер' : parsed ? 'Данные из QR' : 'Новый замер'}
@@ -101,7 +94,7 @@ export default function MeasurementSheet({
               Удалить
             </button>
           )}
-          <button className="btn primary grow" disabled={!done} onClick={save}>
+          <button className="btn primary grow" disabled={!done || !!dateError} onClick={save}>
             Сохранить
           </button>
         </div>
@@ -175,7 +168,8 @@ export default function MeasurementSheet({
 
       <div className="field">
         <label>Дата и время замера</label>
-        <input className="input" type="datetime-local" value={date} onChange={(e) => setDate(e.target.value)} />
+        <input className="input" type="datetime-local" value={date} max={toLocalInput(new Date().toISOString())} onChange={(e) => setDate(e.target.value)} />
+        {dateError && <span className="small bad">{dateError}</span>}
       </div>
       <div className="grid2">
         <div className="field">
@@ -229,3 +223,12 @@ export default function MeasurementSheet({
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
 const round2 = (v: number) => Math.round(v * 100) / 100;
+
+export default function MeasurementSheet(props: { open: boolean; onClose: () => void; parsed?: QrParse | null; edit?: Measurement | null }) {
+  const n = useRef(0);
+  const was = useRef(false);
+  if (props.open && !was.current) n.current++;
+  was.current = props.open;
+  if (!props.open) return null;
+  return <MeasurementBody key={n.current} {...props} />;
+}

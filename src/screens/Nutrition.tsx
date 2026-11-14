@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, ChefHat, Clock, Flame, Footprints, Plus, RefreshCw, Trash2, Watch } from 'lucide-react';
 import { useApp } from '../lib/store';
 import { useLive, useNow, useTargets, useBias, useLedgerInput } from '../lib/hooks';
@@ -6,9 +6,10 @@ import { dailyBalances, dayExpenditure, entryMacros, metKcal, stepsKcal, sumMacr
 import { addDays, dayKey, fmtDay, fmtWeekday } from '../lib/date';
 import { ACTIVITIES } from '../lib/met';
 import { GOAL_DEFAULT_PROTEIN, GOAL_DEFAULT_RATE, GOAL_LABEL } from '../lib/nutrition';
-import { foodById, planDay, suggestDishes, type DayPlan, type Suggestion } from '../lib/mealPlanner';
+import { foodById, planDay, slotsForMeals, suggestDishes, type DayPlan, type Suggestion } from '../lib/mealPlanner';
 import { Chips, MacroBar, NumField, Ring, Seg, Sheet, fmt, signed, toast } from '../ui/kit';
 import { AddFoodSheet, entryTime, entryToPickable, MEAL_LABEL, MEALS, mealByTime, PortionSheet } from './FoodSheets';
+import { AlertTriangle } from 'lucide-react';
 import { success } from '../lib/native';
 import type { FoodEntry, Goal, MealSlot } from '../lib/types';
 import type { RecipeInfo } from '../lib/mealPlanner';
@@ -19,6 +20,15 @@ export default function NutritionScreen({ active }: { active: boolean }) {
   const [day, setDay] = useState(dayKey());
   const live = useLive(now);
   const targets = useTargets(live);
+  // follow the calendar: if the diary was showing "today" and midnight passed, move to the new day
+  const today = dayKey(now);
+  const lastToday = useRef(today);
+  useEffect(() => {
+    if (today !== lastToday.current) {
+      if (day === lastToday.current) setDay(today);
+      lastToday.current = today;
+    }
+  }, [today]);
 
   return (
     <div className={`screen ${active ? 'screen-enter' : ''}`}>
@@ -41,7 +51,7 @@ export default function NutritionScreen({ active }: { active: boolean }) {
       </div>
       {sub === 'diary' && <Diary day={day} setDay={setDay} now={now} />}
       {sub === 'norm' && <Norm />}
-      {sub === 'cook' && <Cook day={dayKey()} />}
+      {sub === 'cook' && <Cook day={today} />}
     </div>
   );
 }
@@ -61,6 +71,9 @@ function Diary({ day, setDay, now }: { day: string; setDay: (d: string) => void;
   const [addMeal, setAddMeal] = useState<MealSlot | null>(null);
   const [edit, setEdit] = useState<FoodEntry | null>(null);
   const [actOpen, setActOpen] = useState(false);
+  const setDayActivity = useApp((s) => s.setDayActivity);
+  // entries eaten before the weigh-in of that day are not part of the ledger
+  const anchorMs = live && dayKey(live.anchor.date) === day ? new Date(live.anchor.date).getTime() : null;
 
   const total = sumMacros(entries);
   const today = dayKey(now);
@@ -92,7 +105,7 @@ function Diary({ day, setDay, now }: { day: string; setDay: (d: string) => void;
         <div className="card glow">
           <div className="row" style={{ gap: 18 }}>
             <Ring value={total.kcal} max={t.kcal} size={128} stroke={11}>
-              <div className="big">{fmt(Math.max(0, t.kcal - total.kcal))}</div>
+              <div className="big">{total.kcal > t.kcal ? '+' + fmt(total.kcal - t.kcal) : fmt(t.kcal - total.kcal)}</div>
               <div className="cap">{total.kcal > t.kcal ? 'сверх нормы' : 'осталось ккал'}</div>
             </Ring>
             <div className="grow">
@@ -127,6 +140,30 @@ function Diary({ day, setDay, now }: { day: string; setDay: (d: string) => void;
               К концу дня расход ≈ {fmt(fullExp)} ккал → итог {signed(total.kcal - fullExp)} ккал = {signed(((total.kcal - fullExp) / 7700) * 1000)} г жира
             </div>
           )}
+        </div>
+      )}
+
+      {!isToday && entries.length > 0 && (bal?.suspect || act?.complete !== undefined) && (
+        <div className="note" style={act?.complete ? { background: 'rgba(124,247,200,.06)', borderColor: 'rgba(124,247,200,.25)', color: 'var(--text-2)' } : undefined}>
+          <AlertTriangle size={16} />
+          <div>
+            {bal?.suspect
+              ? `Записано всего ${fmt(total.kcal)} ккал — похоже, дневник за этот день заполнен не полностью. День не учитывается в балансе, чтобы не получилось ложного похудения.`
+              : act?.complete
+                ? 'День отмечен как заполненный полностью и учитывается в балансе.'
+                : 'День исключён из баланса.'}
+            <div style={{ marginTop: 8 }}>
+              {act?.complete ? (
+                <button className="btn sm" onClick={() => setDayActivity(day, { complete: undefined })}>
+                  Отменить
+                </button>
+              ) : (
+                <button className="btn sm" onClick={() => setDayActivity(day, { complete: true })}>
+                  Это всё, что я съел — учитывать
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -166,6 +203,7 @@ function Diary({ day, setDay, now }: { day: string; setDay: (d: string) => void;
                       <div className="title ellipsis">{e.name}</div>
                       <div className="meta">
                         {fmt(e.grams)} г · Б {fmt(em.p, 1)} Ж {fmt(em.f, 1)} У {fmt(em.c, 1)}
+                        {anchorMs !== null && new Date(e.time).getTime() < anchorMs && <span className="badge amber" style={{ marginLeft: 6 }}>до замера</span>}
                       </div>
                     </div>
                     <div className="right bold num">{fmt(em.kcal)}</div>
@@ -184,12 +222,14 @@ function Diary({ day, setDay, now }: { day: string; setDay: (d: string) => void;
       <PortionSheet
         open={!!edit}
         item={edit ? entryToPickable(edit) : null}
+        day={day}
         initialMeal={edit?.meal ?? 'lunch'}
         initialGrams={edit?.grams}
+        initialTime={edit?.time}
         title="Изменить"
         onClose={() => setEdit(null)}
-        onSave={(grams, meal) => {
-          updateFood(day, edit!.id, { grams, meal });
+        onSave={(grams, meal, _item, time) => {
+          updateFood(day, edit!.id, { grams, meal, time });
           setEdit(null);
         }}
         onDelete={() => {
@@ -284,9 +324,9 @@ function ActivitySheet({ open, onClose, day }: { open: boolean; onClose: () => v
       <button
         className="btn primary block"
         style={{ marginTop: 10 }}
-        disabled={!mins}
+        disabled={!mins || mins <= 0}
         onClick={() => {
-          addActivity(day, { time: entryTime(day), name: at.name, minutes: mins!, met: at.met, kcal: manualKcal ?? est, source: manualKcal ? 'manual' : 'cardio' });
+          addActivity(day, { time: entryTime(day), name: at.name, minutes: mins!, met: at.met, kcal: manualKcal ?? est, source: manualKcal ? 'manual' : 'cardio', stepBased: at.steps });
           setManualKcal(undefined);
           success();
           toast('Активность добавлена');
@@ -294,6 +334,8 @@ function ActivitySheet({ open, onClose, day }: { open: boolean; onClose: () => v
       >
         <Plus size={18} /> Добавить {fmt(manualKcal ?? est)} ккал
       </button>
+      {profile.activityMode === 'steps' && at.steps && <p className="tiny" style={{ color: 'var(--amber)' }}>В режиме «Шаги» ходьба и бег уже посчитаны шагомером — эта активность не прибавится второй раз.</p>}
+      {profile.activityMode === 'watch' && <p className="tiny" style={{ color: 'var(--amber)' }}>В режиме «Часы» активность не прибавляется — её уже посчитали часы.</p>}
       <p className="tiny muted">Считаем чистый расход сверх покоя: (MET − 1) × вес × часы — обмен покоя уже учтён в базовом обмене.</p>
 
       {(act?.activities.length ?? 0) > 0 && (
@@ -386,6 +428,12 @@ function Norm() {
           <span className="k">Тренировки в среднем за день {plan ? '' : '(нет программы)'}</span>
           <span className="v">+{fmt(t.workoutsAvg)}</span>
         </div>
+        {Math.abs(t.bias) >= 1 && (
+          <div className="kv">
+            <span className="k">Автокоррекция по замерам</span>
+            <span className="v">{signed(t.bias)}</span>
+          </div>
+        )}
         <div className="kv total">
           <span className="k bold">Расход (поддержание)</span>
           <span className="v">{fmt(t.tdee)}</span>
@@ -460,25 +508,38 @@ function Cook({ day }: { day: string }) {
   const [mode, setMode] = useState<'now' | 'rest' | 'day'>('now');
   const [custom, setCustom] = useState<{ p?: number; f?: number; c?: number } | null>(null);
   const [seed, setSeed] = useState(1);
-  const [open, setOpen] = useState<{ info: RecipeInfo; grams: number } | null>(null);
-  if (!t) return null;
-
-  const eaten = sumMacros(entries);
-  const remaining = { kcal: Math.max(0, t.kcal - eaten.kcal), p: Math.max(0, t.p - eaten.p), f: Math.max(0, t.f - eaten.f), c: Math.max(0, t.c - eaten.c) };
-  const mealsDone = new Set(entries.map((e) => e.meal)).size;
-  const mealsLeft = Math.max(1, prefs.mealsPerDay - mealsDone);
-
-  let target = mode === 'day' ? { kcal: t.kcal, p: t.p, f: t.f, c: t.c } : remaining;
-  if (custom && (custom.p || custom.f || custom.c)) {
-    const p = custom.p ?? 0,
-      f = custom.f ?? 0,
-      c = custom.c ?? 0;
-    target = { p, f, c, kcal: p * 4 + f * 9 + c * 4 };
-  }
-  const single = mode === 'now' ? { kcal: target.kcal / (custom ? 1 : mealsLeft), p: target.p / (custom ? 1 : mealsLeft), f: target.f / (custom ? 1 : mealsLeft), c: target.c / (custom ? 1 : mealsLeft) } : target;
-
-  const dishes: Suggestion[] = mode === 'now' ? suggestDishes(single, prefs, undefined, 14) : [];
-  const plans: DayPlan[] = mode !== 'now' ? planDay(target, prefs, mode === 'day' ? prefs.mealsPerDay : Math.min(mealsLeft, 5), 3, seed * 7919) : [];
+  const [open, setOpen] = useState<{ info: RecipeInfo; grams: number; slot?: MealSlot; n: number } | null>(null);
+  const openN = useRef(0);
+  const show = (info: RecipeInfo, grams: number, slot?: MealSlot) => setOpen({ info, grams, slot, n: ++openN.current });
+  const tk = t ? `${t.kcal}|${t.p}|${t.f}|${t.c}` : '';
+  const ek = entries.map((e) => e.id + e.grams + e.meal).join(',');
+  const ck = custom ? `${custom.p}|${custom.f}|${custom.c}` : '';
+  const calc = useMemo(() => {
+    if (!t) return null;
+    const eaten = sumMacros(entries);
+    const remaining = { kcal: Math.max(0, t.kcal - eaten.kcal), p: Math.max(0, t.p - eaten.p), f: Math.max(0, t.f - eaten.f), c: Math.max(0, t.c - eaten.c) };
+    // meal slots of the day that have nothing logged yet
+    const eatenSlots = new Set(entries.map((e) => e.meal));
+    let restSlots = slotsForMeals(prefs.mealsPerDay).filter((sl) => !eatenSlots.has(sl));
+    if (!restSlots.length && remaining.kcal > 120) restSlots = ['snack'];
+    const mealsLeft = Math.max(1, restSlots.length);
+    let target = mode === 'day' ? { kcal: t.kcal, p: t.p, f: t.f, c: t.c } : remaining;
+    const isCustom = !!custom && !!(custom.p || custom.f || custom.c);
+    if (isCustom) {
+      const p = custom!.p ?? 0,
+        f = custom!.f ?? 0,
+        c = custom!.c ?? 0;
+      target = { p, f, c, kcal: p * 4 + f * 9 + c * 4 };
+    }
+    const div = mode === 'now' && !isCustom ? mealsLeft : 1;
+    const single = { kcal: target.kcal / div, p: target.p / div, f: target.f / div, c: target.c / div };
+    const nothingLeft = mode !== 'day' && !isCustom && remaining.kcal < 60;
+    const dishes: Suggestion[] = mode === 'now' && !nothingLeft ? suggestDishes(single, prefs, isCustom ? undefined : restSlots[0], 14) : [];
+    const plans: DayPlan[] = mode !== 'now' && !nothingLeft ? planDay(target, prefs, mode === 'day' ? prefs.mealsPerDay : isCustom ? Math.min(mealsLeft, 5) : restSlots, 3, seed * 7919) : [];
+    return { single, mealsLeft, dishes, plans, nothingLeft };
+  }, [tk, ek, ck, mode, seed, prefs]);
+  if (!t || !calc) return null;
+  const { single, mealsLeft, dishes, plans, nothingLeft } = calc;
 
   return (
     <>
@@ -523,9 +584,11 @@ function Cook({ day }: { day: string }) {
         </div>
       </div>
 
+      {nothingLeft && <div className="empty">Норма на сегодня уже выбрана. Посмотри «Целый день», чтобы спланировать завтра.</div>}
+      {mode === 'now' && !nothingLeft && dishes.length === 0 && <div className="empty">Нет подходящих блюд — ослабь фильтры в настройках питания.</div>}
       {mode === 'now' &&
         dishes.map((s) => (
-          <button key={s.info.recipe.id} className="card" style={{ width: '100%', textAlign: 'left' }} onClick={() => setOpen({ info: s.info, grams: s.grams })}>
+          <button key={s.info.recipe.id} className="card" style={{ width: '100%', textAlign: 'left' }} onClick={() => show(s.info, s.grams)}>
             <div className="row between">
               <div className="grow" style={{ minWidth: 0 }}>
                 <div className="bold">{s.info.recipe.name}</div>
@@ -546,7 +609,7 @@ function Cook({ day }: { day: string }) {
 
       {mode !== 'now' && (
         <>
-          {plans.length === 0 && <div className="empty">Нет подходящих рецептов — ослабь фильтры в настройках питания.</div>}
+          {plans.length === 0 && !nothingLeft && <div className="empty">Нет подходящих рецептов — ослабь фильтры в настройках питания.</div>}
           {plans.map((pl, i) => (
             <div className="card" key={i}>
               <div className="card-title">
@@ -554,7 +617,7 @@ function Cook({ day }: { day: string }) {
                 <span className="badge accent">{fmt(pl.fit)}% совпадение</span>
               </div>
               {pl.meals.map((m, j) => (
-                <div className="item" key={j} onClick={() => setOpen({ info: m.info, grams: m.grams })} role="button">
+                <div className="item" key={j} onClick={() => show(m.info, m.grams, m.slot)} role="button">
                   <div className="grow" style={{ minWidth: 0 }}>
                     <div className="tiny muted bold">{MEAL_LABEL[m.slot]}</div>
                     <div className="title ellipsis">{m.info.recipe.name}</div>
@@ -583,7 +646,7 @@ function Cook({ day }: { day: string }) {
         data={open}
         onClose={() => setOpen(null)}
         onAdd={(info, grams, meal) => {
-          addFood(day, { time: entryTime(day), meal, name: info.recipe.name, grams, per100: info.per100, foodId: `recipe_${info.recipe.id}` });
+          addFood(day, { time: entryTime(day, meal), meal, name: info.recipe.name, grams, per100: info.per100, foodId: `recipe_${info.recipe.id}` });
           success();
           toast('Добавлено в дневник');
           setOpen(null);
@@ -593,23 +656,22 @@ function Cook({ day }: { day: string }) {
   );
 }
 
-function RecipeSheet({ data, onClose, onAdd }: { data: { info: RecipeInfo; grams: number } | null; onClose: () => void; onAdd: (info: RecipeInfo, grams: number, meal: MealSlot) => void }) {
-  const [grams, setGrams] = useState<number | undefined>(data?.grams);
-  const [meal, setMeal] = useState<MealSlot>(mealByTime());
-  const key = data ? data.info.recipe.id + data.grams : '';
-  const [lastKey, setLastKey] = useState('');
-  if (data && key !== lastKey) {
-    setLastKey(key);
-    setGrams(data.grams);
-  }
+function RecipeSheet({ data, onClose, onAdd }: { data: { info: RecipeInfo; grams: number; slot?: MealSlot; n: number } | null; onClose: () => void; onAdd: (info: RecipeInfo, grams: number, meal: MealSlot) => void }) {
   if (!data) return null;
+  // remounted for every opening, so grams / meal always start from the suggestion
+  return <RecipeBody key={data.n} data={data} onClose={onClose} onAdd={onAdd} />;
+}
+
+function RecipeBody({ data, onClose, onAdd }: { data: { info: RecipeInfo; grams: number; slot?: MealSlot }; onClose: () => void; onAdd: (info: RecipeInfo, grams: number, meal: MealSlot) => void }) {
+  const [grams, setGrams] = useState<number | undefined>(data.grams);
+  const [meal, setMeal] = useState<MealSlot>(data.slot ?? mealByTime());
   const { info } = data;
   const g = grams ?? 0;
   const scale = g / info.total.grams;
   const k = g / 100;
   return (
     <Sheet
-      open={!!data}
+      open
       onClose={onClose}
       full
       title={info.recipe.name}
@@ -631,7 +693,7 @@ function RecipeSheet({ data, onClose, onAdd }: { data: { info: RecipeInfo; grams
       </div>
       <div className="field">
         <label>Моя порция (готового блюда)</label>
-        <NumField value={grams} onChange={setGrams} suffix="г" big />
+        <NumField value={grams} onChange={setGrams} suffix="г" big max={5000} />
       </div>
       <div className="grid3" style={{ marginBottom: 12, textAlign: 'center' }}>
         <div className="stat">

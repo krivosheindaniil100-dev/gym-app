@@ -4,6 +4,8 @@ import { bmrKatch, KCAL_PER_KG_FAT, type Composition } from './energy';
 export interface Targets {
   bmr: number;
   base: number;
+  /** calibrated correction included in tdee */
+  bias: number;
   workoutsAvg: number;
   tdee: number;
   dailyDelta: number; // kcal/day relative to tdee (negative = deficit)
@@ -42,14 +44,24 @@ export function planWorkoutsPerDay(plan: TrainingPlan | null, weight: number) {
   return total / 7;
 }
 
-export function computeTargets(profile: Profile, comp: Composition, plan: TrainingPlan | null, avgWatch?: number): Targets {
+export interface TargetOpts {
+  /** average "active kcal" from the watch over recent days */
+  avgWatch?: number;
+  /** average net kcal of steps over recent days (steps mode) */
+  avgStepsKcal?: number;
+  /** calibrated correction of expenditure, kcal/day */
+  bias?: number;
+}
+
+export function computeTargets(profile: Profile, comp: Composition, plan: TrainingPlan | null, opts: TargetOpts = {}): Targets {
   const bmr = bmrKatch(comp.ffm);
   let base: number;
-  if (profile.activityMode === 'watch') base = bmr * 1.1 + (avgWatch ?? 350);
-  else if (profile.activityMode === 'steps') base = bmr * 1.15 + 250;
+  if (profile.activityMode === 'watch') base = bmr * 1.1 + (opts.avgWatch ?? 350);
+  else if (profile.activityMode === 'steps') base = bmr * 1.15 + (opts.avgStepsKcal ?? 250);
   else base = bmr * profile.activityFactor;
   const workoutsAvg = profile.activityMode === 'watch' ? 0 : planWorkoutsPerDay(plan, comp.weight);
-  const tdee = base + workoutsAvg;
+  const bias = opts.bias ?? 0;
+  const tdee = base + workoutsAvg + bias;
   const weeklyKg = (comp.weight * profile.weeklyRatePct) / 100;
   let dailyDelta = (weeklyKg * KCAL_PER_KG_FAT) / 7;
   const warnings: string[] = [];
@@ -72,6 +84,7 @@ export function computeTargets(profile: Profile, comp: Composition, plan: Traini
   return {
     bmr,
     base,
+    bias,
     workoutsAvg,
     tdee,
     dailyDelta: kcal - tdee,

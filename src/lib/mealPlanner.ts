@@ -151,8 +151,12 @@ const SLOT_SETS: Record<number, MealSlot[]> = {
 };
 
 /** Plan several meals that together match the target. Returns a few diverse variants. */
-export function planDay(target: MacroTarget, prefs: FoodPrefs, meals: number, variants = 3, seed = Date.now()): DayPlan[] {
-  const slots = SLOT_SETS[Math.max(1, Math.min(5, meals))];
+export const slotsForMeals = (meals: number): MealSlot[] => SLOT_SETS[Math.max(1, Math.min(5, meals))];
+
+/** @param meals number of meals, or the explicit list of slots still to be eaten */
+export function planDay(target: MacroTarget, prefs: FoodPrefs, meals: number | MealSlot[], variants = 3, seed = Date.now()): DayPlan[] {
+  const slots = Array.isArray(meals) ? meals : slotsForMeals(meals);
+  if (!slots.length || !(target.kcal > 50)) return [];
   let rnd = seed % 2147483647;
   const rand = () => (rnd = (rnd * 16807) % 2147483647) / 2147483647;
   const pools = slots.map((sl) => recipeInfos().filter((ri) => allowedByPrefs(ri, prefs) && ri.recipe.slots.includes(sl)));
@@ -176,7 +180,7 @@ export function planDay(target: MacroTarget, prefs: FoodPrefs, meals: number, va
     const g = pick.map((ri, i) => (target.kcal * (share[slots[i]] / shareSum) * 100) / Math.max(ri.per100.kcal, 30));
     const lo = pick.map((ri) => ri.serving.grams * 0.6);
     const hi = pick.map((ri, i) => ri.serving.grams * (slots[i] === 'snack' ? 1.3 : 1.7));
-    const slotKcal = slots.map((sl) => (target.kcal * share[sl]) / shareSum);
+    const slotKcal = slots.map((sl) => Math.max(50, (target.kcal * share[sl]) / shareSum));
     const WS = 0.35;
     // coordinate descent on grams
     const total = () => {
